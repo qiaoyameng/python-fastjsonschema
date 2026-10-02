@@ -62,6 +62,12 @@ class CodeGenerator:
         self._root_definition = definition
         self._definition = None
 
+        # Stack of (variable, set_name) pairs tracking evaluated object
+        # properties at runtime. Used only by draft 2019-09 to implement
+        # unevaluatedProperties; stays empty for older drafts.
+        self._evaluated_scopes = []
+        self._evaluated_scope_counter = 0
+
         # map schema URIs to validation function names for functions
         # that are not yet generated, but need to be generated
         self._needed_validation_functions = {}
@@ -193,6 +199,65 @@ class CodeGenerator:
         finally:
             self._fast_fail = fast_fail
 
+    def _current_evaluated_scope(self):
+        """
+        Name of the runtime set collecting properties evaluated for the current
+        variable, or None when evaluated properties are not tracked here (which
+        is always the case for drafts older than 2019-09).
+        """
+        for variable, scope_name in reversed(self._evaluated_scopes):
+            if variable == self._variable:
+                return scope_name
+        return None
+
+    def _new_evaluated_scope_name(self):
+        self._evaluated_scope_counter += 1
+        return '{}_evaluated{}'.format(self._variable, self._evaluated_scope_counter)
+
+    @contextmanager
+    def _temp_evaluated_scope(self):
+        """
+        Isolates evaluated-properties tracking of a trial subschema (anyOf,
+        oneOf, not, if). Yields ``(parent_scope, temp_scope)``; both are None
+        when tracking is inactive. Annotations collected in the temporary set
+        are merged into the parent scope only by an explicit
+        ``_merge_evaluated_scope`` call on the success path, so a failed branch
+        never claims properties for the final object.
+        """
+        parent_scope = self._current_evaluated_scope()
+        if parent_scope is None:
+            yield None, None
+            return
+        scope_name = self._new_evaluated_scope_name()
+        self.l('{} = set()', scope_name)
+        self._evaluated_scopes.append((self._variable, scope_name))
+        try:
+            yield parent_scope, scope_name
+        finally:
+            self._evaluated_scopes.pop()
+
+    def _merge_evaluated_scope(self, parent_scope, scope_name):
+        self.l('{}.update({})', parent_scope, scope_name)
+
+    def _mark_evaluated(self, key_expression):
+        """
+        Generate code marking a property of the current variable as evaluated
+        (annotation for unevaluatedProperties). No-op for drafts without
+        evaluated-properties tracking.
+        """
+        scope_name = self._current_evaluated_scope()
+        if scope_name is not None:
+            self.l('{}.add({})', scope_name, key_expression)
+
+    def _mark_evaluated_keys(self):
+        """
+        Generate code marking all remaining (not yet evaluated) keys of the
+        current variable as evaluated. No-op without tracking.
+        """
+        scope_name = self._current_evaluated_scope()
+        if scope_name is not None:
+            self.l('{}.update({{variable}}_keys)'.format(scope_name))
+
     def _generate_func_code_block(self, definition):
         if not isinstance(definition, dict):
             raise JsonSchemaDefinitionException("definition must be an object")
@@ -235,6 +300,11 @@ class CodeGenerator:
             name_arg = '(name_prefix or "data") + "{}"'.format(path)
             if '{' in name_arg or '}' in name_arg:
                 name_arg = name_arg + '.format(**locals())'
+            # When evaluated properties are tracked (draft 2019-09), the
+            # referenced function reports them back through the passed set.
+            evaluated_scope = self._current_evaluated_scope()
+            evaluated_arg = ', {}'.format(evaluated_scope) if evaluated_scope is not None else ''
+            name_arg = name_arg + evaluated_arg
             if self._fast_fail:
                 self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
             else:

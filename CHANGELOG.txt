@@ -1,5 +1,9 @@
 === UNRELEASED
 
+* Added partial support of draft 2019-09: keyword `unevaluatedProperties` with
+  evaluated-properties tracking through `properties`, `patternProperties`,
+  `additionalProperties`, `$ref`, `allOf`, `anyOf`, `oneOf` and `if`/`then`/`else`,
+  and `$ref` no longer overriding sibling keywords
 * Fixed property names with `{` or `}` being evaluated as format string in error messages
 * Fixed numeric keywords (minimum, maximum, multipleOf, exclusiveMinimum, exclusiveMaximum) being applied to booleans
 * Fixed `propertyNames: false` crashing on non-object values

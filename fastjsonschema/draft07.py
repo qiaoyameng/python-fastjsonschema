@@ -60,12 +60,14 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
         with self.l('try:', optimize=False):
             code_len = len(self._code)
             with self.trial_validation():
-                self.generate_func_code_block(
-                    self._definition['if'],
-                    self._variable,
-                    self._variable_name,
-                    clear_variables=True
-                )
+                # Annotations of `if` count only when it validates successfully.
+                with self._temp_evaluated_scope() as (parent_scope, if_scope):
+                    self.generate_func_code_block(
+                        self._definition['if'],
+                        self._variable,
+                        self._variable_name,
+                        clear_variables=True
+                    )
             if len(self._code) == code_len:
                 self.l('pass')
         with self.l('except {}:', VALIDATION_EXCEPTIONS):
@@ -81,15 +83,18 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
                     self.l('pass')
             else:
                 self.l('pass')
-        if 'then' in self._definition:
+        if 'then' in self._definition or if_scope is not None:
             with self.l('else:'):
                 code_len = len(self._code)
-                self.generate_func_code_block(
-                    self._definition['then'],
-                    self._variable,
-                    self._variable_name,
-                    clear_variables=True
-                )
+                if if_scope is not None:
+                    self._merge_evaluated_scope(parent_scope, if_scope)
+                if 'then' in self._definition:
+                    self.generate_func_code_block(
+                        self._definition['then'],
+                        self._variable,
+                        self._variable_name,
+                        clear_variables=True
+                    )
                 if len(self._code) == code_len:
                     self.l('pass')
 

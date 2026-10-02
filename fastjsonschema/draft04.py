@@ -1,5 +1,6 @@
 import decimal
 import re
+from contextlib import nullcontext
 
 from .exceptions import JsonSchemaDefinitionException
 from .generator import VALIDATION_EXCEPTIONS, CodeGenerator, enforce_list, repr_default
@@ -192,13 +193,25 @@ class CodeGeneratorDraft04(CodeGenerator):
         self._any_or_one_of_count += 1
         count = self._any_or_one_of_count
         self.l('{variable}_any_of_count{count} = 0', count=count)
+        # When evaluated properties are tracked (draft 2019-09), every valid
+        # branch contributes its annotations, so no branch can be skipped.
+        skip_passed = self._current_evaluated_scope() is None
         for definition_item in self._definition['anyOf']:
             # When we know it's passing (at least once), we do not need to do another expensive try-except.
-            with self.l('if not {variable}_any_of_count{count}:', count=count, optimize=False):
+            if skip_passed:
+                guard = self.l('if not {variable}_any_of_count{count}:', count=count, optimize=False)
+            else:
+                guard = nullcontext()
+            with guard:
                 with self.l('try:', optimize=False):
                     with self.trial_validation():
-                        self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+                        with self._temp_evaluated_scope() as (parent_scope, temp_scope):
+                            self.generate_func_code_block(
+                                definition_item, self._variable, self._variable_name, clear_variables=True,
+                            )
                     self.l('{variable}_any_of_count{count} += 1', count=count)
+                    if temp_scope is not None:
+                        self._merge_evaluated_scope(parent_scope, temp_scope)
                 self.l('except {}: pass', VALIDATION_EXCEPTIONS)
 
         with self.l('if not {variable}_any_of_count{count}:', count=count, optimize=False):
@@ -228,8 +241,13 @@ class CodeGeneratorDraft04(CodeGenerator):
             with self.l('if {variable}_one_of_count{count} < 2:', count=count, optimize=False):
                 with self.l('try:', optimize=False):
                     with self.trial_validation():
-                        self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+                        with self._temp_evaluated_scope() as (parent_scope, temp_scope):
+                            self.generate_func_code_block(
+                                definition_item, self._variable, self._variable_name, clear_variables=True,
+                            )
                     self.l('{variable}_one_of_count{count} += 1', count=count)
+                    if temp_scope is not None:
+                        self._merge_evaluated_scope(parent_scope, temp_scope)
                 self.l('except {}: pass', VALIDATION_EXCEPTIONS)
 
         with self.l('if {variable}_one_of_count{count} != 1:', count=count):
@@ -260,7 +278,12 @@ class CodeGeneratorDraft04(CodeGenerator):
             with self.l('try:', optimize=False):
                 code_len = len(self._code)
                 with self.trial_validation():
-                    self.generate_func_code_block(not_definition, self._variable, self._variable_name, clear_variables=True)
+                    # Annotations of `not` never propagate, so evaluated
+                    # properties tracked inside are always discarded.
+                    with self._temp_evaluated_scope():
+                        self.generate_func_code_block(
+                            not_definition, self._variable, self._variable_name, clear_variables=True,
+                        )
                 if len(self._code) == code_len:
                     self.l('pass')
             self.l('except {}: pass', VALIDATION_EXCEPTIONS)
@@ -553,6 +576,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                     raise JsonSchemaDefinitionException('{}[{}] must be object'.format(self._variable, key_name))
                 with self.l('if "{}" in {variable}_keys:', self.e(key)):
                     self.l('{variable}_keys.remove("{}")', self.e(key))
+                    self._mark_evaluated(repr(key))
                     self.l('{variable}__{0} = {variable}["{1}"]', key_name, self.e(key))
                     self.generate_func_code_block(
                         prop_definition,
@@ -561,7 +585,13 @@ class CodeGeneratorDraft04(CodeGenerator):
                         clear_variables=True,
                     )
                 if self._use_default and isinstance(prop_definition, dict) and 'default' in prop_definition:
-                    self.l('else: {variable}["{}"] = {}', self.e(key), repr_default(prop_definition['default']))
+                    if self._current_evaluated_scope() is None:
+                        self.l('else: {variable}["{}"] = {}', self.e(key), repr_default(prop_definition['default']))
+                    else:
+                        with self.l('else:'):
+                            self.l('{variable}["{}"] = {}', self.e(key), repr_default(prop_definition['default']))
+                            # A key filled in from default is evaluated by properties as well.
+                            self._mark_evaluated(repr(key))
 
     def generate_pattern_properties(self):
         """
@@ -590,6 +620,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                     with self.l('if REGEX_PATTERNS[{}].search({variable}_key):', repr(pattern)):
                         with self.l('if {variable}_key in {variable}_keys:'):
                             self.l('{variable}_keys.remove({variable}_key)')
+                        self._mark_evaluated('{}_key'.format(self._variable))
                         self.generate_func_code_block(
                             definition,
                             '{}_val'.format(self._variable),
@@ -618,6 +649,8 @@ class CodeGeneratorDraft04(CodeGenerator):
             self.create_variable_keys()
             add_prop_definition = self._definition["additionalProperties"]
             if add_prop_definition is True or add_prop_definition == {}:
+                # All remaining keys are evaluated by this keyword.
+                self._mark_evaluated_keys()
                 return
             if add_prop_definition:
                 properties_keys = list(self._definition.get("properties", {}).keys())
@@ -629,6 +662,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                             '{}_value'.format(self._variable),
                             '{}.{{{}_key}}'.format(self._variable_name, self._variable),
                         )
+                self._mark_evaluated_keys()
             else:
                 with self.l('if {variable}_keys:'):
                     self.exc('{name} must not contain "+str({variable}_keys)+" properties', rule='additionalProperties')

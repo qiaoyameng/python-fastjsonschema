@@ -18,8 +18,9 @@ About
 *****
 
 ``fastjsonschema`` implements validation of JSON documents by JSON schema.
-The library implements JSON schema drafts 04, 06, and 07. The main purpose is
-to have a really fast implementation. See some numbers:
+The library implements JSON schema drafts 04, 06 and 07, and a subset of
+draft 2019-09. The main purpose is to have a really fast implementation.
+See some numbers:
 
  * Probably the most popular, ``jsonschema``, can take up to 5 seconds for valid
    inputs and 1.2 seconds for invalid inputs.
@@ -59,9 +60,18 @@ script:
     validictory                    valid      ==>  0.2730411
     validictory                    invalid    ==>  0.0183669
 
-This library follows and implements `JSON schema draft-04, draft-06, and draft-07
+This library follows and implements `JSON schema draft-04, draft-06 and draft-07
 <http://json-schema.org>`_. Sometimes it's not perfectly clear, so I recommend also
 check out this `understanding JSON schema <https://spacetelescope.github.io/understanding-json-schema>`_.
+
+Draft 2019-09 is supported only partially. On top of draft-07, the supported
+keywords are ``unevaluatedProperties`` (with evaluated-properties tracking
+through ``properties``, ``patternProperties``, ``additionalProperties``,
+``$ref``, ``allOf``, ``anyOf``, ``oneOf`` and ``if``/``then``/``else``) and
+``$ref`` combined with sibling keywords (it no longer overrides them).
+Other draft 2019-09 features such as ``$recursiveRef``, ``$anchor``,
+``unevaluatedItems``, ``dependentSchemas``, ``minContains``, ``maxContains``
+or ``vocabulary`` are not implemented.
 
 Note that there are some differences compared to JSON schema standard:
 
@@ -209,9 +219,11 @@ def compile(
         data = validate({})
         assert data == {'a': 42}
 
-    Supported implementations are draft-04, draft-06 and draft-07. Which version
-    should be used is determined by `$draft` in your ``definition``. When not
-    specified, the latest implementation is used (draft-07).
+    Supported implementations are draft-04, draft-06, draft-07 and partially
+    draft 2019-09 (see the module documentation for the supported keywords).
+    Which version should be used is determined by `$schema` in your
+    ``definition``. When not specified, the latest implementation is used
+    (draft 2019-09).
 
     .. code-block:: python
 
