@@ -34,8 +34,24 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
-        super().__init__(definition, resolver, detailed_exceptions, fast_fail)
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        formats={},
+        use_default=True,
+        use_formats=True,
+        detailed_exceptions=True,
+        fast_fail=True,
+        isolate_branches=False,
+    ):
+        super().__init__(
+            definition,
+            resolver,
+            detailed_exceptions,
+            fast_fail,
+            isolate_branches,
+        )
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
@@ -66,7 +82,7 @@ class CodeGeneratorDraft04(CodeGenerator):
             ('patternProperties', self.generate_pattern_properties),
             ('additionalProperties', self.generate_additional_properties),
         ))
-        self._any_or_one_of_count = 0
+        self._trial_count = 0
 
     @property
     def global_state(self):
@@ -189,17 +205,26 @@ class CodeGeneratorDraft04(CodeGenerator):
 
         Valid values for this definition are 3, 4, 5, 10, 11, ... but not 8 for example.
         """
-        self._any_or_one_of_count += 1
-        count = self._any_or_one_of_count
+        self._trial_count += 1
+        count = self._trial_count
         self.l('{variable}_any_of_count{count} = 0', count=count)
-        for definition_item in self._definition['anyOf']:
+        snapshot = None
+        if self._isolate_branches:
+            snapshot = self._create_trial_snapshot(self._variable, count)
+        for index, definition_item in enumerate(self._definition['anyOf']):
             # When we know it's passing (at least once), we do not need to do another expensive try-except.
             with self.l('if not {variable}_any_of_count{count}:', count=count, optimize=False):
                 with self.l('try:', optimize=False):
+                    if self._isolate_branches and index > 0:
+                        self._restore_trial_snapshot(self._variable, snapshot)
                     with self.trial_validation():
                         self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
                     self.l('{variable}_any_of_count{count} += 1', count=count)
-                self.l('except {}: pass', VALIDATION_EXCEPTIONS)
+                with self.l('except {}:', VALIDATION_EXCEPTIONS):
+                    if self._isolate_branches:
+                        self._restore_trial_snapshot(self._variable, snapshot)
+                    else:
+                        self.l('pass')
 
         with self.l('if not {variable}_any_of_count{count}:', count=count, optimize=False):
             self.exc('{name} cannot be validated by any definition', rule='anyOf')
@@ -220,21 +245,54 @@ class CodeGeneratorDraft04(CodeGenerator):
 
         Valid values for this definition are 3, 5, 6, ... but not 15 for example.
         """
-        self._any_or_one_of_count += 1
-        count = self._any_or_one_of_count
+        self._trial_count += 1
+        count = self._trial_count
         self.l('{variable}_one_of_count{count} = 0', count=count)
+        snapshot = winner = None
+        if self._isolate_branches:
+            snapshot = self._create_trial_snapshot(self._variable, count)
+            winner = '{variable}_trial_winner{count}'.format(variable=self._variable, count=count)
+            self.l('{} = None', winner)
         for definition_item in self._definition['oneOf']:
             # When we know it's failing (one of means exactly once), we do not need to do another expensive try-except.
             with self.l('if {variable}_one_of_count{count} < 2:', count=count, optimize=False):
                 with self.l('try:', optimize=False):
+                    if self._isolate_branches:
+                        self._restore_trial_snapshot(self._variable, snapshot)
                     with self.trial_validation():
                         self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
                     self.l('{variable}_one_of_count{count} += 1', count=count)
-                self.l('except {}: pass', VALIDATION_EXCEPTIONS)
+                    if self._isolate_branches:
+                        with self.l('if {variable}_one_of_count{count} == 1:', count=count):
+                            self.l('{} = deepcopy({variable})', winner)
+                        self._restore_trial_snapshot(self._variable, snapshot)
+                with self.l('except {}:', VALIDATION_EXCEPTIONS):
+                    if self._isolate_branches:
+                        self._restore_trial_snapshot(self._variable, snapshot)
+                    else:
+                        self.l('pass')
 
-        with self.l('if {variable}_one_of_count{count} != 1:', count=count):
-            dynamic = '" (" + str({variable}_one_of_count{}) + " matches found)"'
-            self.exc('{name} must be valid exactly by one definition', count, append_to_msg=dynamic, rule='oneOf')
+        if self._isolate_branches:
+            with self.l('if {variable}_one_of_count{count} == 1:', count=count, optimize=False):
+                self._restore_trial_snapshot(self._variable, winner)
+            with self.l('else:', optimize=False):
+                self._restore_trial_snapshot(self._variable, snapshot)
+                self._one_of_error(count)
+        else:
+            with self.l('if {variable}_one_of_count{count} != 1:', count=count):
+                self._one_of_error(count)
+
+    def _one_of_error(self, count):
+        dynamic = '" (" + str({variable}_one_of_count{}) + " matches found)"'
+        self.exc('{name} must be valid exactly by one definition', count, append_to_msg=dynamic, rule='oneOf')
+
+    def _create_trial_snapshot(self, variable, count):
+        snapshot = '{variable}_trial_snapshot{count}'.format(variable=variable, count=count)
+        self.l('{} = deepcopy({})', snapshot, variable)
+        return snapshot
+
+    def _restore_trial_snapshot(self, variable, snapshot):
+        self.l('restore_data({}, {})', variable, snapshot)
 
     def generate_not(self):
         """
@@ -257,14 +315,24 @@ class CodeGeneratorDraft04(CodeGenerator):
         elif not not_definition:
             self.exc('{name} must NOT match a disallowed definition', rule='not')
         else:
+            snapshot = None
+            if self._isolate_branches:
+                self._trial_count += 1
+                snapshot = self._create_trial_snapshot(self._variable, self._trial_count)
             with self.l('try:', optimize=False):
                 code_len = len(self._code)
                 with self.trial_validation():
                     self.generate_func_code_block(not_definition, self._variable, self._variable_name, clear_variables=True)
                 if len(self._code) == code_len:
                     self.l('pass')
-            self.l('except {}: pass', VALIDATION_EXCEPTIONS)
+            with self.l('except {}:', VALIDATION_EXCEPTIONS):
+                if self._isolate_branches:
+                    self._restore_trial_snapshot(self._variable, snapshot)
+                else:
+                    self.l('pass')
             with self.l('else:'):
+                if self._isolate_branches:
+                    self._restore_trial_snapshot(self._variable, snapshot)
                 self.exc('{name} must NOT match a disallowed definition', rule='not')
 
     def generate_min_length(self):

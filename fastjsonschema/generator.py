@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from contextlib import contextmanager
+from copy import deepcopy
 from decimal import Decimal
 import re
 
@@ -10,6 +11,17 @@ from .ref_resolver import RefResolver
 # Both mean "this subschema did not match": a subschema behind a $ref becomes its own
 # function, which reports through JsonSchemaValuesException while errors are collected.
 VALIDATION_EXCEPTIONS = '(JsonSchemaValueException, JsonSchemaValuesException)'
+
+
+def restore_data(value, snapshot):
+    if isinstance(value, dict) and isinstance(snapshot, dict):
+        value.clear()
+        value.update(deepcopy(snapshot))
+    elif isinstance(value, list) and isinstance(snapshot, list):
+        value[:] = deepcopy(snapshot)
+    elif isinstance(value, tuple) and isinstance(snapshot, tuple):
+        for item, item_snapshot in zip(value, snapshot):
+            restore_data(item, item_snapshot)
 
 
 def enforce_list(variable):
@@ -34,12 +46,20 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        detailed_exceptions=True,
+        fast_fail=True,
+        isolate_branches=False,
+    ):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+        self._isolate_branches = isolate_branches
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -72,6 +92,12 @@ class CodeGenerator:
             resolver = RefResolver.from_schema(definition, store={})
         self._resolver = resolver
 
+        if isolate_branches:
+            self._extra_imports_lines.extend((
+                "from copy import deepcopy",
+                "from fastjsonschema.generator import restore_data",
+            ))
+
         # add main function to `self._needed_validation_functions`
         self._needed_validation_functions[self._resolver.get_uri()] = self._resolver.get_scope_name()
 
@@ -95,13 +121,16 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
-        return dict(
+        global_state = dict(
             **self._extra_imports_objects,
             REGEX_PATTERNS=self._compile_regexps,
             re=re,
             JsonSchemaValueException=JsonSchemaValueException,
             JsonSchemaValuesException=JsonSchemaValuesException,
         )
+        if self._isolate_branches:
+            global_state.update(deepcopy=deepcopy, restore_data=restore_data)
+        return global_state
 
     @property
     def global_state_code(self):

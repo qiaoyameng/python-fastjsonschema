@@ -149,6 +149,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    isolate_branches: bool = False,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -169,7 +170,16 @@ def validate(
     :any:`compile` for details and security considerations when schemas are not
     fully trusted.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(
+        definition,
+        handlers,
+        formats,
+        use_default,
+        use_formats,
+        detailed_exceptions,
+        fast_fail,
+        isolate_branches,
+    )(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +192,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    isolate_branches: bool = False,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -270,6 +281,12 @@ def compile(
     By default, the execution stops with the first validation error. If you need
     to collect all the errors, turn this off by passing `fast_fail=False`.
 
+    When a branch in ``anyOf`` or ``oneOf`` fills defaults, pass
+    ``isolate_branches=True`` to try every candidate from the same entry data.
+    Changes from rejected candidates are discarded; ``anyOf`` commits the first
+    successful candidate and ``oneOf`` commits only when exactly one succeeds.
+    Defaults from ``not`` and ``if`` probes are never committed.
+
     Exception :any:`JsonSchemaDefinitionException` is raised when generating the
     code fails (bad definition).
 
@@ -288,6 +305,7 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        isolate_branches,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
@@ -307,6 +325,7 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    isolate_branches: bool = False,
 ) -> str:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
@@ -341,6 +360,7 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        isolate_branches,
     )
     return (
         'VERSION = "' + VERSION + '"\n' +
@@ -357,6 +377,7 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    isolate_branches: bool = False,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
@@ -367,6 +388,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        isolate_branches=isolate_branches,
     )
     return resolver, code_generator
 

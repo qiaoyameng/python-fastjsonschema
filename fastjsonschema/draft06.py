@@ -25,8 +25,18 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
         use_formats=True,
         detailed_exceptions=True,
         fast_fail=True,
+        isolate_branches=False,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(
+            definition,
+            resolver,
+            formats,
+            use_default,
+            use_formats,
+            detailed_exceptions,
+            fast_fail,
+            isolate_branches,
+        )
         self._json_keywords_to_function.update((
             ('exclusiveMinimum', self.generate_exclusive_minimum),
             ('exclusiveMaximum', self.generate_exclusive_maximum),
@@ -166,7 +176,15 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
                     self.exc('{name} must not be empty', rule='contains')
             else:
                 self.l('{variable}_contains = False')
+                snapshot = None
+                if self._isolate_branches:
+                    self._trial_count += 1
                 with self.l('for {variable}_key in {variable}:'):
+                    if self._isolate_branches:
+                        snapshot = self._create_trial_snapshot(
+                            '{}_key'.format(self._variable),
+                            self._trial_count,
+                        )
                     with self.l('try:'):
                         with self.trial_validation():
                             self.generate_func_code_block(
@@ -177,7 +195,11 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
                             )
                         self.l('{variable}_contains = True')
                         self.l('break')
-                    self.l('except {}: pass', VALIDATION_EXCEPTIONS)
+                    with self.l('except {}:', VALIDATION_EXCEPTIONS):
+                        if self._isolate_branches:
+                            self.l('restore_data({variable}_key, {})', snapshot)
+                        else:
+                            self.l('pass')
 
                 with self.l('if not {variable}_contains:'):
                     self.exc('{name} must contain one of contains definition', rule='contains')

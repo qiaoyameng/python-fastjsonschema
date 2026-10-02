@@ -27,9 +27,19 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
         use_default=True,
         use_formats=True,
         detailed_exceptions=True,
-        fast_fail=True
+        fast_fail=True,
+        isolate_branches=False,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(
+            definition,
+            resolver,
+            formats,
+            use_default,
+            use_formats,
+            detailed_exceptions,
+            fast_fail,
+            isolate_branches,
+        )
         # pylint: disable=duplicate-code
         self._json_keywords_to_function.update((
             ('if', self.generate_if_then_else),
@@ -57,6 +67,10 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
 
         Valid values are any between -10 and 0 or any multiplication of two.
         """
+        snapshot = None
+        if self._isolate_branches:
+            self._trial_count += 1
+            snapshot = self._create_trial_snapshot(self._variable, self._trial_count)
         with self.l('try:', optimize=False):
             code_len = len(self._code)
             with self.trial_validation():
@@ -69,6 +83,8 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
             if len(self._code) == code_len:
                 self.l('pass')
         with self.l('except {}:', VALIDATION_EXCEPTIONS):
+            if self._isolate_branches:
+                self._restore_trial_snapshot(self._variable, snapshot)
             if 'else' in self._definition:
                 code_len = len(self._code)
                 self.generate_func_code_block(
@@ -83,6 +99,8 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
                 self.l('pass')
         if 'then' in self._definition:
             with self.l('else:'):
+                if self._isolate_branches:
+                    self._restore_trial_snapshot(self._variable, snapshot)
                 code_len = len(self._code)
                 self.generate_func_code_block(
                     self._definition['then'],
@@ -92,6 +110,9 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
                 )
                 if len(self._code) == code_len:
                     self.l('pass')
+        elif self._isolate_branches:
+            with self.l('else:'):
+                self._restore_trial_snapshot(self._variable, snapshot)
 
     def generate_content_encoding(self):
         """
