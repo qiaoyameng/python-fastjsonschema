@@ -1,5 +1,8 @@
 === UNRELEASED
 
+* Added optional validation budget (`budget` parameter of `compile`, `validate` and `compile_to_code`)
+  limiting data path depth, visited data nodes and collected errors per validation call;
+  exceeding it raises `JsonSchemaBudgetExceededException`
 * Fixed property names with `{` or `}` being evaluated as format string in error messages
 * Fixed numeric keywords (minimum, maximum, multipleOf, exclusiveMinimum, exclusiveMaximum) being applied to booleans
 * Fixed `propertyNames: false` crashing on non-object values

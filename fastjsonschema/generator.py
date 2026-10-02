@@ -3,7 +3,13 @@ from contextlib import contextmanager
 from decimal import Decimal
 import re
 
-from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
+from .budget import BudgetState
+from .exceptions import (
+    JsonSchemaBudgetExceededException,
+    JsonSchemaValueException,
+    JsonSchemaValuesException,
+    JsonSchemaDefinitionException,
+)
 from .indent import indent
 from .ref_resolver import RefResolver
 
@@ -34,12 +40,13 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True, budget=None):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+        self._budget = budget
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -101,6 +108,8 @@ class CodeGenerator:
             re=re,
             JsonSchemaValueException=JsonSchemaValueException,
             JsonSchemaValuesException=JsonSchemaValuesException,
+            JsonSchemaBudgetExceededException=JsonSchemaBudgetExceededException,
+            BudgetState=BudgetState,
         )
 
     @property
@@ -111,15 +120,23 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
+        imports = [
+            'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
+        ]
+        if self._budget is not None:
+            imports = [
+                'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException, '
+                'JsonSchemaBudgetExceededException',
+                'from fastjsonschema.budget import BudgetState',
+            ]
         if not self._compile_regexps:
-            return '\n'.join(self._extra_imports_lines + [
-                'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
+            return '\n'.join(self._extra_imports_lines + imports + [
                 '',
                 '',
             ])
         return '\n'.join(self._extra_imports_lines + [
             'import re',
-            'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
+        ] + imports + [
             '',
             '',
             'REGEX_PATTERNS = ' + serialize_regexes(self._compile_regexps),
@@ -152,13 +169,73 @@ class CodeGenerator:
         self._validation_functions_done.add(uri)
         self.l('')
         with self._resolver.resolving(uri) as definition:
-            with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
+            if self._budget is None:
+                signature = 'def {}(data, custom_formats={{}}, name_prefix=None):'
+            else:
+                signature = 'def {}(data, custom_formats={{}}, name_prefix=None, _budget=None):'
+            with self.l(signature, name):
+                if self._budget is not None:
+                    # Every call gets its own counters, so a compiled validator
+                    # can be shared between threads without mixing budgets.
+                    self.l(
+                        'if _budget is None: _budget = BudgetState(max_depth={!r}, max_nodes={!r}, max_errors={!r})',
+                        self._budget.max_depth, self._budget.max_nodes, self._budget.max_errors,
+                    )
+                    self._emit_budget_node()
                 if not self._fast_fail:
                     self.l('errors = []')
                 self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
                 if not self._fast_fail:
                     self.l('if errors: raise JsonSchemaValuesException(errors)')
                 self.l('return data')
+
+    def _emit_budget_check(self, kind):
+        """
+        Emit a check raising ``JsonSchemaBudgetExceededException`` when the
+        counter ``kind`` (``depth``, ``nodes`` or ``errors``) is over its limit.
+        """
+        limit = getattr(self._budget, 'max_' + kind)
+        if limit is None:
+            return
+        self.l(
+            'if _budget.{0} > {1}: raise JsonSchemaBudgetExceededException('
+            '"validation budget exceeded: {0} " + str(_budget.{0}) + " > {1}", '
+            'budget="{0}", limit={1}, current=_budget.{0})'.format(kind, limit),
+        )
+
+    def _emit_budget_node(self):
+        if self._budget is not None and self._budget.max_nodes is not None:
+            self.l('_budget.nodes += 1')
+            self._emit_budget_check('nodes')
+
+    @contextmanager
+    def descend(self, child_definition):
+        """
+        Wrap validation of a child data node with budget tracking. When no
+        budget is configured, this is a no-op and the generated code is
+        exactly the same as before.
+
+        A child schema that is a plain ``$ref`` is not counted here, because
+        the called validation function counts the node at its entry.
+        """
+        if self._budget is None:
+            yield
+            return
+        is_ref = isinstance(child_definition, dict) and '$ref' in child_definition
+        if not is_ref:
+            self._emit_budget_node()
+        if self._budget.max_depth is None:
+            yield
+            return
+        self.l('_budget.depth += 1')
+        self._emit_budget_check('depth')
+        # The depth has to be restored even when the child validation fails
+        # (e.g. inside a tried anyOf branch), otherwise the leaked depth
+        # would break the budget of the siblings validated afterwards.
+        with self.l('try:', optimize=False):
+            yield
+        with self.l('finally:'):
+            self.l('_budget.depth -= 1')
 
     def generate_func_code_block(self, definition, variable, variable_name, clear_variables=False):
         """
@@ -235,13 +312,14 @@ class CodeGenerator:
             name_arg = '(name_prefix or "data") + "{}"'.format(path)
             if '{' in name_arg or '}' in name_arg:
                 name_arg = name_arg + '.format(**locals())'
+            budget_arg = ', _budget' if self._budget is not None else ''
             if self._fast_fail:
-                self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                self.l('{}({variable}, custom_formats, {name_arg}'+budget_arg+')', name, name_arg=name_arg)
             else:
                 # The referenced function collects into its own list, so merge it into ours
                 # instead of letting it abort the validation of the rest of the document.
                 with self.l('try:', optimize=False):
-                    self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                    self.l('{}({variable}, custom_formats, {name_arg}'+budget_arg+')', name, name_arg=name_arg)
                 with self.l('except JsonSchemaValuesException as e:'):
                     self.l('errors.extend(e.errors)')
 
@@ -303,6 +381,11 @@ class CodeGenerator:
         """
         Short-cut for creating raising exception in the code.
         """
+        if self._budget is not None and self._budget.max_errors is not None:
+            # Count every error, even one raised inside a tried anyOf/oneOf/not
+            # branch: a failed trial consumes the budget, it never resets it.
+            self.l('_budget.errors += 1')
+            self._emit_budget_check('errors')
         if not self._detailed_exceptions:
             if self._fast_fail:
                 self.l('raise JsonSchemaValueException("'+msg+'")', *args)

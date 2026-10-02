@@ -109,12 +109,14 @@ from collections.abc import Callable, Mapping
 from functools import partial, update_wrapper
 from typing import Any
 
+from .budget import ValidationBudget
 from .draft04 import CodeGeneratorDraft04
 from .draft06 import CodeGeneratorDraft06
 from .draft07 import CodeGeneratorDraft07
 from .draft2019 import CodeGeneratorDraft2019
 from .exceptions import (
     JsonSchemaException,
+    JsonSchemaBudgetExceededException,
     JsonSchemaValueException,
     JsonSchemaValuesException,
     JsonSchemaDefinitionException,
@@ -125,9 +127,11 @@ from .version import VERSION
 __all__ = (
     'VERSION',
     'JsonSchemaException',
+    'JsonSchemaBudgetExceededException',
     'JsonSchemaValueException',
     'JsonSchemaValuesException',
     'JsonSchemaDefinitionException',
+    'ValidationBudget',
     'validate',
     'compile',
     'compile_to_code',
@@ -149,6 +153,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    budget: 'ValidationBudget | Mapping[str, int] | None' = None,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -169,7 +174,9 @@ def validate(
     :any:`compile` for details and security considerations when schemas are not
     fully trusted.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(
+        definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail, budget,
+    )(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +189,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    budget: 'ValidationBudget | Mapping[str, int] | None' = None,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -279,6 +287,25 @@ def compile(
     Exception :any:`JsonSchemaValuesException` is raised from generated function when
     validation fails (data do not follow the definition) contatining all the errors
     (when fast_fail is set to `False`).
+
+    An optional validation ``budget`` (a :any:`ValidationBudget` instance or a
+    mapping with ``max_depth``, ``max_nodes`` and/or ``max_errors`` keys) limits
+    how much work a single validation call may do: the depth of the current
+    data path, the total number of visited data nodes and the cumulative
+    number of validation errors. Counters are shared between functions
+    generated for ``$ref`` and between composition branches, and a failed
+    trial validation never resets them. When a limit is exceeded,
+    :any:`JsonSchemaBudgetExceededException` is raised (it is not caught by
+    ``anyOf`` and friends). Every call gets fresh counters, so the compiled
+    validator stays safe for concurrent reuse. When no budget is given, the
+    generated code is exactly the same as before.
+
+    .. code-block:: python
+
+        validate = fastjsonschema.compile(
+            definition,
+            budget=fastjsonschema.ValidationBudget(max_depth=32, max_nodes=10000),
+        )
     """
     resolver, code_generator = _factory(
         definition,
@@ -288,6 +315,7 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        budget,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
@@ -307,6 +335,7 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    budget: 'ValidationBudget | Mapping[str, int] | None' = None,
 ) -> str:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
@@ -332,6 +361,9 @@ def compile_to_code(
 
     Remote ``$ref`` URIs are resolved the same way as in :any:`compile`; see its
     documentation for ``handlers`` and security considerations.
+
+    The optional validation ``budget`` parameter works the same way as in
+    :any:`compile`.
     """
     _, code_generator = _factory(
         definition,
@@ -341,6 +373,7 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        budget,
     )
     return (
         'VERSION = "' + VERSION + '"\n' +
@@ -357,7 +390,10 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    budget: 'ValidationBudget | Mapping[str, int] | None' = None,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
+    if budget is not None and not isinstance(budget, ValidationBudget):
+        budget = ValidationBudget(**budget)
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
         definition,
@@ -367,6 +403,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        budget=budget,
     )
     return resolver, code_generator
 

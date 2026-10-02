@@ -25,8 +25,9 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
         use_formats=True,
         detailed_exceptions=True,
         fast_fail=True,
+        budget=None,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail, budget)
         self._json_keywords_to_function.update((
             ('exclusiveMinimum', self.generate_exclusive_minimum),
             ('exclusiveMaximum', self.generate_exclusive_maximum),
@@ -169,12 +170,13 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
                 with self.l('for {variable}_key in {variable}:'):
                     with self.l('try:'):
                         with self.trial_validation():
-                            self.generate_func_code_block(
-                                contains_definition,
-                                '{}_key'.format(self._variable),
-                                self._variable_name,
-                                clear_variables=True,
-                            )
+                            with self.descend(contains_definition):
+                                self.generate_func_code_block(
+                                    contains_definition,
+                                    '{}_key'.format(self._variable),
+                                    self._variable_name,
+                                    clear_variables=True,
+                                )
                         self.l('{variable}_contains = True')
                         self.l('break')
                     self.l('except {}: pass', VALIDATION_EXCEPTIONS)

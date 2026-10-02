@@ -69,6 +69,36 @@ class JsonSchemaValuesException(JsonSchemaException):
         self.errors = errors
 
 
+class JsonSchemaBudgetExceededException(JsonSchemaException):
+    """
+    Exception raised by validation function when a configured validation
+    budget is exceeded. Available properties:
+
+     * ``message`` containing human-readable information,
+     * ``budget`` naming the exceeded budget (``depth``, ``nodes`` or ``errors``),
+     * ``limit`` of the exceeded budget
+     * and ``current`` value of the counter when the budget was exceeded.
+
+    It deliberately does not inherit from :any:`JsonSchemaValueException`, so
+    it is never swallowed by trial validations of ``anyOf``, ``oneOf``,
+    ``not``, ``if``, ``contains`` or ``propertyNames`` and always aborts the
+    whole validation run.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        budget: str | None = None,
+        limit: int | None = None,
+        current: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.budget = budget
+        self.limit = limit
+        self.current = current
+
+
 class JsonSchemaDefinitionException(JsonSchemaException):
     """
     Exception raised by generator of validation function.
