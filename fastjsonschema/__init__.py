@@ -149,6 +149,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    exact_decimal: bool = False,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -169,7 +170,16 @@ def validate(
     :any:`compile` for details and security considerations when schemas are not
     fully trusted.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(
+        definition,
+        handlers,
+        formats,
+        use_default,
+        use_formats,
+        detailed_exceptions,
+        fast_fail,
+        exact_decimal,
+    )(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +192,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    exact_decimal: bool = False,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -279,6 +290,11 @@ def compile(
     Exception :any:`JsonSchemaValuesException` is raised from generated function when
     validation fails (data do not follow the definition) contatining all the errors
     (when fast_fail is set to `False`).
+
+    Set ``exact_decimal=True`` to validate billing-style JSON parsed with
+    ``json.loads(..., parse_float=Decimal)``. Numeric constraints and comparisons
+    then use exact ``Decimal`` constants, Python integers remain integers,
+    booleans are not treated as numbers, and NaN/infinity are rejected.
     """
     resolver, code_generator = _factory(
         definition,
@@ -288,6 +304,7 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        exact_decimal,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
@@ -307,6 +324,7 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    exact_decimal: bool = False,
 ) -> str:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
@@ -341,6 +359,7 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        exact_decimal,
     )
     return (
         'VERSION = "' + VERSION + '"\n' +
@@ -357,6 +376,7 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    exact_decimal: bool = False,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
@@ -367,6 +387,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        exact_decimal=exact_decimal,
     )
     return resolver, code_generator
 

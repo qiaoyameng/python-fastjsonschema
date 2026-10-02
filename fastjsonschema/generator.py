@@ -2,7 +2,16 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from decimal import Decimal
 import re
+import sys
 
+from ._numbers import (
+    decimal_is_multiple,
+    exact_decimal_is_integer,
+    exact_json_decimal,
+    exact_json_number_is_multiple,
+    exact_json_numbers_equal,
+    reject_non_finite_json_numbers,
+)
 from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
 from .indent import indent
 from .ref_resolver import RefResolver
@@ -16,6 +25,20 @@ def enforce_list(variable):
     if isinstance(variable, list):
         return variable
     return [variable]
+
+
+@contextmanager
+def unlimited_integer_string_conversion():
+    set_limit = getattr(sys, "set_int_max_str_digits", None)
+    if set_limit is None:
+        yield
+    else:
+        old_limit = sys.get_int_max_str_digits()
+        set_limit(0)
+        try:
+            yield
+        finally:
+            set_limit(old_limit)
 
 
 # pylint: disable=too-many-instance-attributes,too-many-public-methods
@@ -34,12 +57,20 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        detailed_exceptions=True,
+        fast_fail=True,
+        exact_decimal=False,
+    ):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+        self._exact_decimal = exact_decimal
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -50,6 +81,26 @@ class CodeGenerator:
         self._extra_imports_objects = {
             "Decimal": Decimal,
         }
+        if exact_decimal:
+            self._extra_imports_lines = [
+                "from decimal import Decimal",
+                "from fastjsonschema._numbers import (",
+                "    decimal_is_multiple,",
+                "    exact_decimal_is_integer,",
+                "    exact_json_decimal,",
+                "    exact_json_number_is_multiple,",
+                "    exact_json_numbers_equal,",
+                "    reject_non_finite_json_numbers,",
+                ")",
+            ]
+            self._extra_imports_objects.update({
+                "decimal_is_multiple": decimal_is_multiple,
+                "exact_decimal_is_integer": exact_decimal_is_integer,
+                "exact_json_decimal": exact_json_decimal,
+                "exact_json_number_is_multiple": exact_json_number_is_multiple,
+                "exact_json_numbers_equal": exact_json_numbers_equal,
+                "reject_non_finite_json_numbers": reject_non_finite_json_numbers,
+            })
 
         self._variables = {}
         self._scope_stack = []
@@ -155,6 +206,8 @@ class CodeGenerator:
             with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
                 if not self._fast_fail:
                     self.l('errors = []')
+                if self._exact_decimal:
+                    self._reject_non_finite_numbers('data', '(name_prefix or "data")')
                 self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
                 if not self._fast_fail:
                     self.l('if errors: raise JsonSchemaValuesException(errors)')
@@ -282,7 +335,8 @@ class CodeGenerator:
             name=name,
             **kwds
         )
-        line = line.format(*args, **context)
+        with unlimited_integer_string_conversion():
+            line = line.format(*args, **context)
         line = line.replace('\n', '\\n').replace('\r', '\\r')
         self._code.append(spaces + line)
         return line
@@ -295,6 +349,11 @@ class CodeGenerator:
 
             self.l('raise JsonSchemaValueException("Variable: {}")', self.e(variable))
         """
+        if isinstance(string, bool):
+            return str(string).replace('"', '\\"')
+        if isinstance(string, int):
+            with unlimited_integer_string_conversion():
+                return str(string).replace('"', '\\"')
         if isinstance(string, str):
             return string.encode('unicode_escape').decode('ascii').replace('"', '\\"')
         return str(string).replace('"', '\\"')
@@ -390,6 +449,20 @@ class CodeGenerator:
         self._variables[variable_name] = tuple(self._scope_stack)
         self.l('{variable}_is_dict = isinstance({variable}, dict)')
 
+    def _reject_non_finite_numbers(self, variable, name):
+        with self.l('try:'):
+            self.l(
+                'reject_non_finite_json_numbers({}, {})',
+                variable,
+                name,
+            )
+        with self.l('except JsonSchemaValueException as non_finite_error:'):
+            if self._fast_fail:
+                self.l('raise')
+            else:
+                self.l('errors.append(non_finite_error)')
+                self.l('raise JsonSchemaValuesException(errors)')
+
 
 def serialize_regexes(patterns_dict):
     # Unfortunately using `pprint.pformat` is causing errors
@@ -409,6 +482,18 @@ def repr_default(value):
     generated code, so a schema default of NaN or infinity has to be written
     out as a ``float(...)`` call instead.
     """
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return repr(value)
+        return exact_decimal_literal(value)
+    if isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, int):
+        with unlimited_integer_string_conversion():
+            digits = str(abs(value))
+            if len(digits) > 4000:
+                return 'int({})'.format(repr(str(value)))
+            return repr(value)
     if isinstance(value, float) and (value != value or value in (float('inf'), float('-inf'))):
         return "float({!r})".format(str(value))
     if isinstance(value, list):
@@ -420,6 +505,23 @@ def repr_default(value):
             '{}: {}'.format(repr_default(k), repr_default(v)) for k, v in value.items()
         ) + '}'
     return repr(value)
+
+
+def exact_decimal_literal(value):
+    if isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, int):
+        with unlimited_integer_string_conversion():
+            return "Decimal({})".format(repr(str(value)))
+    if isinstance(value, float):
+        if not (value == value and -float("inf") < value < float("inf")):
+            raise JsonSchemaDefinitionException("numeric constraints must be finite")
+        return "Decimal({})".format(repr(repr(value)))
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise JsonSchemaDefinitionException("numeric constraints must be finite")
+        return "Decimal({})".format(repr(str(value)))
+    raise JsonSchemaDefinitionException("numeric constraints must be a number")
 
 
 def repr_regex(regex):

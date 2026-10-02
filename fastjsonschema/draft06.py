@@ -25,8 +25,18 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
         use_formats=True,
         detailed_exceptions=True,
         fast_fail=True,
+        exact_decimal=False,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(
+            definition,
+            resolver,
+            formats,
+            use_default,
+            use_formats,
+            detailed_exceptions,
+            fast_fail,
+            exact_decimal,
+        )
         self._json_keywords_to_function.update((
             ('exclusiveMinimum', self.generate_exclusive_minimum),
             ('exclusiveMaximum', self.generate_exclusive_maximum),
@@ -65,6 +75,8 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
             {'type': ['string', 'number']}
         """
         types = enforce_list(self._definition['type'])
+        if self._exact_decimal:
+            return self._generate_exact_type(types)
         try:
             python_types = ', '.join(JSON_TYPE_TO_PYTHON_TYPE[t] for t in types)
         except KeyError as exc:
@@ -85,17 +97,29 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
 
     def generate_exclusive_minimum(self):
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
-            if not isinstance(self._definition['exclusiveMinimum'], (int, float, decimal.Decimal)):
-                raise JsonSchemaDefinitionException('exclusiveMinimum must be an integer, a float or a decimal')
-            with self.l('if {variable} <= {exclusiveMinimum}:'):
-                self.exc('{name} must be bigger than {exclusiveMinimum}', rule='exclusiveMinimum')
+            if self._exact_decimal:
+                minimum = self._exact_numeric_literal('exclusiveMinimum')
+                number = self._exact_numeric_expression()
+                with self.l('if {number} <= {minimum_value}:', number=number, minimum_value=minimum):
+                    self.exc('{name} must be bigger than {exclusiveMinimum}', rule='exclusiveMinimum')
+            else:
+                if not isinstance(self._definition['exclusiveMinimum'], (int, float, decimal.Decimal)):
+                    raise JsonSchemaDefinitionException('exclusiveMinimum must be an integer, a float or a decimal')
+                with self.l('if {variable} <= {exclusiveMinimum}:'):
+                    self.exc('{name} must be bigger than {exclusiveMinimum}', rule='exclusiveMinimum')
 
     def generate_exclusive_maximum(self):
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
-            if not isinstance(self._definition['exclusiveMaximum'], (int, float, decimal.Decimal)):
-                raise JsonSchemaDefinitionException('exclusiveMaximum must be an integer, a float or a decimal')
-            with self.l('if {variable} >= {exclusiveMaximum}:'):
-                self.exc('{name} must be smaller than {exclusiveMaximum}', rule='exclusiveMaximum')
+            if self._exact_decimal:
+                maximum = self._exact_numeric_literal('exclusiveMaximum')
+                number = self._exact_numeric_expression()
+                with self.l('if {number} >= {maximum_value}:', number=number, maximum_value=maximum):
+                    self.exc('{name} must be smaller than {exclusiveMaximum}', rule='exclusiveMaximum')
+            else:
+                if not isinstance(self._definition['exclusiveMaximum'], (int, float, decimal.Decimal)):
+                    raise JsonSchemaDefinitionException('exclusiveMaximum must be an integer, a float or a decimal')
+                with self.l('if {variable} >= {exclusiveMaximum}:'):
+                    self.exc('{name} must be smaller than {exclusiveMaximum}', rule='exclusiveMaximum')
 
     def generate_property_names(self):
         """

@@ -2,7 +2,13 @@ import decimal
 import re
 
 from .exceptions import JsonSchemaDefinitionException
-from .generator import VALIDATION_EXCEPTIONS, CodeGenerator, enforce_list, repr_default
+from .generator import (
+    VALIDATION_EXCEPTIONS,
+    CodeGenerator,
+    enforce_list,
+    exact_decimal_literal,
+    repr_default,
+)
 
 
 JSON_TYPE_TO_PYTHON_TYPE = {
@@ -34,8 +40,18 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
-        super().__init__(definition, resolver, detailed_exceptions, fast_fail)
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        formats={},
+        use_default=True,
+        use_formats=True,
+        detailed_exceptions=True,
+        fast_fail=True,
+        exact_decimal=False,
+    ):
+        super().__init__(definition, resolver, detailed_exceptions, fast_fail, exact_decimal)
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
@@ -84,6 +100,8 @@ class CodeGeneratorDraft04(CodeGenerator):
             {'type': ['string', 'number']}
         """
         types = enforce_list(self._definition['type'])
+        if self._exact_decimal:
+            return self._generate_exact_type(types)
         try:
             python_types = ', '.join(JSON_TYPE_TO_PYTHON_TYPE[t] for t in types)
         except KeyError as exc:
@@ -95,6 +113,40 @@ class CodeGeneratorDraft04(CodeGenerator):
 
         with self.l('if not isinstance({variable}, ({})){}:', python_types, extra):
             self.exc('{name} must be {}', ' or '.join(types), rule='type')
+
+    def _generate_exact_type(self, types):
+        exact_python_types = dict(JSON_TYPE_TO_PYTHON_TYPE)
+        exact_python_types['integer'] = 'int, float, Decimal'
+        try:
+            python_types = ', '.join(exact_python_types[t] for t in types)
+        except KeyError as exc:
+            raise JsonSchemaDefinitionException('Unknown type') from exc
+
+        extra = ''
+        if ('number' in types or 'integer' in types) and 'boolean' not in types:
+            extra = ' or isinstance({variable}, bool)'.format(variable=self._variable)
+
+        with self.l('if not isinstance({variable}, ({})){}:', python_types, extra):
+            self.exc('{name} must be {}', ' or '.join(types), rule='type')
+
+        if 'number' in types or 'integer' in types:
+            with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
+                self.l('{variable} = exact_json_decimal({variable})')
+                if 'integer' in types and 'number' not in types:
+                    with self.l('if not exact_decimal_is_integer({variable}):'):
+                        self.exc('{name} must be integer', rule='type')
+
+    def _exact_numeric_literal(self, key):
+        value = self._definition[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float, decimal.Decimal)):
+            raise JsonSchemaDefinitionException('{} must be a number'.format(key))
+        literal = exact_decimal_literal(value)
+        if key == 'multipleOf' and value <= 0:
+            raise JsonSchemaDefinitionException('multipleOf must be a positive number')
+        return literal
+
+    def _exact_numeric_expression(self):
+        return 'exact_json_decimal({})'.format(self._variable)
 
     def generate_enum(self):
         """
@@ -120,6 +172,11 @@ class CodeGeneratorDraft04(CodeGenerator):
     def _enum_value_matches(self, var, value):
         if isinstance(value, bool):
             return 'isinstance({var}, bool) and {var} is {val}'.format(var=var, val=repr(value))
+        if self._exact_decimal and isinstance(value, (int, float, decimal.Decimal)):
+            return (
+                'isinstance({var}, (int, float, Decimal)) and not isinstance({var}, bool) '
+                'and exact_json_numbers_equal({var}, {val})'
+            ).format(var=var, val=exact_decimal_literal(value))
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return (
                 'isinstance({var}, (int, float)) and not isinstance({var}, bool) and {var} == {val}'
@@ -321,7 +378,8 @@ class CodeGeneratorDraft04(CodeGenerator):
                 self._generate_format(format_, format_ + '_re_pattern', format_regex)
             # Format regex is used only in meta schemas.
             elif format_ == 'regex':
-                self._extra_imports_lines = ['import re']
+                if 'import re' not in self._extra_imports_lines:
+                    self._extra_imports_lines.append('import re')
                 with self.l('try:', optimize=False):
                     self.l('re.compile({variable})')
                 with self.l('except Exception:'):
@@ -337,41 +395,68 @@ class CodeGeneratorDraft04(CodeGenerator):
 
     def generate_minimum(self):
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
-            if not isinstance(self._definition['minimum'], (int, float, decimal.Decimal)):
-                raise JsonSchemaDefinitionException('minimum must be a number')
-            if self._definition.get('exclusiveMinimum', False):
-                with self.l('if {variable} <= {minimum}:'):
-                    self.exc('{name} must be bigger than {minimum}', rule='minimum')
+            if self._exact_decimal:
+                minimum = self._exact_numeric_literal('minimum')
+                number = self._exact_numeric_expression()
+                if self._definition.get('exclusiveMinimum', False):
+                    with self.l('if {number} <= {minimum_value}:', number=number, minimum_value=minimum):
+                        self.exc('{name} must be bigger than {minimum}', rule='minimum')
+                else:
+                    with self.l('if {number} < {minimum_value}:', number=number, minimum_value=minimum):
+                        self.exc('{name} must be bigger than or equal to {minimum}', rule='minimum')
             else:
-                with self.l('if {variable} < {minimum}:'):
-                    self.exc('{name} must be bigger than or equal to {minimum}', rule='minimum')
+                if not isinstance(self._definition['minimum'], (int, float, decimal.Decimal)):
+                    raise JsonSchemaDefinitionException('minimum must be a number')
+                if self._definition.get('exclusiveMinimum', False):
+                    with self.l('if {variable} <= {minimum}:'):
+                        self.exc('{name} must be bigger than {minimum}', rule='minimum')
+                else:
+                    with self.l('if {variable} < {minimum}:'):
+                        self.exc('{name} must be bigger than or equal to {minimum}', rule='minimum')
 
     def generate_maximum(self):
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
-            if not isinstance(self._definition['maximum'], (int, float, decimal.Decimal)):
-                raise JsonSchemaDefinitionException('maximum must be a number')
-            if self._definition.get('exclusiveMaximum', False):
-                with self.l('if {variable} >= {maximum}:'):
-                    self.exc('{name} must be smaller than {maximum}', rule='maximum')
+            if self._exact_decimal:
+                maximum = self._exact_numeric_literal('maximum')
+                number = self._exact_numeric_expression()
+                if self._definition.get('exclusiveMaximum', False):
+                    with self.l('if {number} >= {maximum_value}:', number=number, maximum_value=maximum):
+                        self.exc('{name} must be smaller than {maximum}', rule='maximum')
+                else:
+                    with self.l('if {number} > {maximum_value}:', number=number, maximum_value=maximum):
+                        self.exc('{name} must be smaller than or equal to {maximum}', rule='maximum')
             else:
-                with self.l('if {variable} > {maximum}:'):
-                    self.exc('{name} must be smaller than or equal to {maximum}', rule='maximum')
+                if not isinstance(self._definition['maximum'], (int, float, decimal.Decimal)):
+                    raise JsonSchemaDefinitionException('maximum must be a number')
+                if self._definition.get('exclusiveMaximum', False):
+                    with self.l('if {variable} >= {maximum}:'):
+                        self.exc('{name} must be smaller than {maximum}', rule='maximum')
+                else:
+                    with self.l('if {variable} > {maximum}:'):
+                        self.exc('{name} must be smaller than or equal to {maximum}', rule='maximum')
 
     def generate_multiple_of(self):
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
-            if not isinstance(self._definition['multipleOf'], (int, float, decimal.Decimal)):
-                raise JsonSchemaDefinitionException('multipleOf must be a number')
-            # For proper multiplication check of floats we need to use decimals,
-            # because for example 19.01 / 0.01 = 1901.0000000000002.
-            if isinstance(self._definition['multipleOf'], float):
-                self.l('quotient = Decimal(repr({variable})) / Decimal(repr({multipleOf}))')
+            if self._exact_decimal:
+                multiple_of = self._exact_numeric_literal('multipleOf')
+                number = self._exact_numeric_expression()
+                with self.l('if not exact_json_number_is_multiple({number}, {multiple_of_value}):',
+                            number=number, multiple_of_value=multiple_of):
+                    self.exc('{name} must be multiple of {multipleOf}', rule='multipleOf')
             else:
-                self.l('quotient = {variable} / {multipleOf}')
-            with self.l('if int(quotient) != quotient:'):
-                self.exc('{name} must be multiple of {multipleOf}', rule='multipleOf')
-            # For example, 1e308 / 0.123456789
-            with self.l('if {variable} / {multipleOf} == float("inf"):'):
-                self.exc('inifinity reached', rule='multipleOf')
+                if not isinstance(self._definition['multipleOf'], (int, float, decimal.Decimal)):
+                    raise JsonSchemaDefinitionException('multipleOf must be a number')
+                # For proper multiplication check of floats we need to use decimals,
+                # because for example 19.01 / 0.01 = 1901.0000000000002.
+                if isinstance(self._definition['multipleOf'], float):
+                    self.l('quotient = Decimal(repr({variable})) / Decimal(repr({multipleOf}))')
+                else:
+                    self.l('quotient = {variable} / {multipleOf}')
+                with self.l('if int(quotient) != quotient:'):
+                    self.exc('{name} must be multiple of {multipleOf}', rule='multipleOf')
+                # For example, 1e308 / 0.123456789
+                with self.l('if {variable} / {multipleOf} == float("inf"):'):
+                    self.exc('inifinity reached', rule='multipleOf')
 
     def generate_min_items(self):
         self.create_variable_is_list()
