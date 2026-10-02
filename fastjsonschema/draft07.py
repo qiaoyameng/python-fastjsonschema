@@ -27,9 +27,19 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
         use_default=True,
         use_formats=True,
         detailed_exceptions=True,
-        fast_fail=True
+        fast_fail=True,
+        isolate_branches=False,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(
+            definition,
+            resolver,
+            formats,
+            use_default,
+            use_formats,
+            detailed_exceptions,
+            fast_fail,
+            isolate_branches,
+        )
         # pylint: disable=duplicate-code
         self._json_keywords_to_function.update((
             ('if', self.generate_if_then_else),
@@ -57,15 +67,22 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
 
         Valid values are any between -10 and 0 or any multiplication of two.
         """
+        candidate_variable = None
+        if self._isolate_branches:
+            candidate_variable = self.next_branch_variable(self._variable)
+            self.l('{candidate} = deepcopy({variable})', candidate=candidate_variable)
         with self.l('try:', optimize=False):
             code_len = len(self._code)
             with self.trial_validation():
-                self.generate_func_code_block(
-                    self._definition['if'],
-                    self._variable,
-                    self._variable_name,
-                    clear_variables=True
-                )
+                if self._isolate_branches:
+                    self.generate_branch_candidate(self._definition['if'], candidate_variable)
+                else:
+                    self.generate_func_code_block(
+                        self._definition['if'],
+                        self._variable,
+                        self._variable_name,
+                        clear_variables=True
+                    )
             if len(self._code) == code_len:
                 self.l('pass')
         with self.l('except {}:', VALIDATION_EXCEPTIONS):

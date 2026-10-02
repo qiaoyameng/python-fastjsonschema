@@ -1,5 +1,6 @@
 === UNRELEASED
 
+* Added `isolate_branches` option to keep defaults from rejected anyOf, oneOf, not and if branches out of validated data
 * Fixed property names with `{` or `}` being evaluated as format string in error messages
 * Fixed numeric keywords (minimum, maximum, multipleOf, exclusiveMinimum, exclusiveMaximum) being applied to booleans
 * Fixed `propertyNames: false` crashing on non-object values

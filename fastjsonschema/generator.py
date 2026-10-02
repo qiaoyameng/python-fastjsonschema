@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from contextlib import contextmanager
+from copy import deepcopy
 from decimal import Decimal
 import re
 
@@ -34,12 +35,21 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        detailed_exceptions=True,
+        fast_fail=True,
+        isolate_branches=False,
+    ):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+        self._isolate_branches = isolate_branches
+        self._branch_counter = 0
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -50,6 +60,9 @@ class CodeGenerator:
         self._extra_imports_objects = {
             "Decimal": Decimal,
         }
+        if isolate_branches:
+            self._extra_imports_lines.append("from copy import deepcopy")
+            self._extra_imports_objects["deepcopy"] = deepcopy
 
         self._variables = {}
         self._scope_stack = []
@@ -137,6 +150,16 @@ class CodeGenerator:
         for creating code by definition.
         """
         self.l('NoneType = type(None)')
+        if self._isolate_branches:
+            self.l('def _commit_branch(value, candidate):')
+            self.l('    if isinstance(value, dict):')
+            self.l('        value.clear()')
+            self.l('        value.update(candidate)')
+            self.l('    elif isinstance(value, list):')
+            self.l('        value[:] = candidate')
+            self.l('    else:')
+            self.l('        return candidate')
+            self.l('    return value')
         # Generate parts that are referenced and not yet generated
         while self._needed_validation_functions:
             # During generation of validation function, could be needed to generate
@@ -192,6 +215,18 @@ class CodeGenerator:
             yield
         finally:
             self._fast_fail = fast_fail
+
+    def next_branch_variable(self, variable):
+        self._branch_counter += 1
+        return '{}_branch_candidate{}'.format(variable, self._branch_counter)
+
+    def generate_branch_candidate(self, definition, candidate_variable):
+        return self.generate_func_code_block(
+            definition,
+            candidate_variable,
+            self._variable_name,
+            clear_variables=True,
+        )
 
     def _generate_func_code_block(self, definition):
         if not isinstance(definition, dict):

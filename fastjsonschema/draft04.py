@@ -34,8 +34,18 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
-        super().__init__(definition, resolver, detailed_exceptions, fast_fail)
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        formats={},
+        use_default=True,
+        use_formats=True,
+        detailed_exceptions=True,
+        fast_fail=True,
+        isolate_branches=False,
+    ):
+        super().__init__(definition, resolver, detailed_exceptions, fast_fail, isolate_branches)
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
@@ -192,12 +202,24 @@ class CodeGeneratorDraft04(CodeGenerator):
         self._any_or_one_of_count += 1
         count = self._any_or_one_of_count
         self.l('{variable}_any_of_count{count} = 0', count=count)
+        candidate_variable = None
+        if self._isolate_branches:
+            candidate_variable = self.next_branch_variable(self._variable)
         for definition_item in self._definition['anyOf']:
             # When we know it's passing (at least once), we do not need to do another expensive try-except.
             with self.l('if not {variable}_any_of_count{count}:', count=count, optimize=False):
+                if self._isolate_branches:
+                    self.l('{candidate} = deepcopy({variable})', candidate=candidate_variable)
                 with self.l('try:', optimize=False):
                     with self.trial_validation():
-                        self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+                        if self._isolate_branches:
+                            self.generate_branch_candidate(definition_item, candidate_variable)
+                        else:
+                            self.generate_func_code_block(
+                                definition_item, self._variable, self._variable_name, clear_variables=True
+                            )
+                    if self._isolate_branches:
+                        self.l('{variable} = _commit_branch({variable}, {candidate})', candidate=candidate_variable)
                     self.l('{variable}_any_of_count{count} += 1', count=count)
                 self.l('except {}: pass', VALIDATION_EXCEPTIONS)
 
@@ -223,18 +245,39 @@ class CodeGeneratorDraft04(CodeGenerator):
         self._any_or_one_of_count += 1
         count = self._any_or_one_of_count
         self.l('{variable}_one_of_count{count} = 0', count=count)
+        candidate_variable = None
+        match_variable = None
+        if self._isolate_branches:
+            candidate_variable = self.next_branch_variable(self._variable)
+            match_variable = '{}_one_of_match{}'.format(self._variable, count)
+            self.l('{candidate} = deepcopy({variable})', candidate=candidate_variable)
+            self.l('{match} = None', match=match_variable)
         for definition_item in self._definition['oneOf']:
-            # When we know it's failing (one of means exactly once), we do not need to do another expensive try-except.
-            with self.l('if {variable}_one_of_count{count} < 2:', count=count, optimize=False):
+            if self._isolate_branches:
                 with self.l('try:', optimize=False):
                     with self.trial_validation():
-                        self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+                        self.generate_branch_candidate(definition_item, candidate_variable)
                     self.l('{variable}_one_of_count{count} += 1', count=count)
+                    self.l('{match} = {candidate}', match=match_variable, candidate=candidate_variable)
                 self.l('except {}: pass', VALIDATION_EXCEPTIONS)
+                self.l('{candidate} = deepcopy({variable})', candidate=candidate_variable)
+            else:
+                # When we know it's failing (one of means exactly once), we do not need to do another expensive try-except.
+                with self.l('if {variable}_one_of_count{count} < 2:', count=count, optimize=False):
+                    with self.l('try:', optimize=False):
+                        with self.trial_validation():
+                            self.generate_func_code_block(
+                                definition_item, self._variable, self._variable_name, clear_variables=True
+                            )
+                        self.l('{variable}_one_of_count{count} += 1', count=count)
+                    self.l('except {}: pass', VALIDATION_EXCEPTIONS)
 
         with self.l('if {variable}_one_of_count{count} != 1:', count=count):
             dynamic = '" (" + str({variable}_one_of_count{}) + " matches found)"'
             self.exc('{name} must be valid exactly by one definition', count, append_to_msg=dynamic, rule='oneOf')
+        if self._isolate_branches:
+            with self.l('if {variable}_one_of_count{count} == 1:', count=count, optimize=False):
+                self.l('{variable} = _commit_branch({variable}, {match})', match=match_variable)
 
     def generate_not(self):
         """
@@ -260,7 +303,14 @@ class CodeGeneratorDraft04(CodeGenerator):
             with self.l('try:', optimize=False):
                 code_len = len(self._code)
                 with self.trial_validation():
-                    self.generate_func_code_block(not_definition, self._variable, self._variable_name, clear_variables=True)
+                    if self._isolate_branches:
+                        candidate_variable = self.next_branch_variable(self._variable)
+                        self.l('{candidate} = deepcopy({variable})', candidate=candidate_variable)
+                        self.generate_branch_candidate(not_definition, candidate_variable)
+                    else:
+                        self.generate_func_code_block(
+                            not_definition, self._variable, self._variable_name, clear_variables=True
+                        )
                 if len(self._code) == code_len:
                     self.l('pass')
             self.l('except {}: pass', VALIDATION_EXCEPTIONS)
