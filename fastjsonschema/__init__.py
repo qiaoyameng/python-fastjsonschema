@@ -149,6 +149,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    exact_decimal: bool = False,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -169,7 +170,9 @@ def validate(
     :any:`compile` for details and security considerations when schemas are not
     fully trusted.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(
+        definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail, exact_decimal,
+    )(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +185,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    exact_decimal: bool = False,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -270,6 +274,26 @@ def compile(
     By default, the execution stops with the first validation error. If you need
     to collect all the errors, turn this off by passing `fast_fail=False`.
 
+    When data is parsed with ``json.loads(..., parse_float=Decimal,
+    parse_int=int)`` (or otherwise contains :class:`decimal.Decimal` values),
+    pass `exact_decimal=True` to validate every numeric keyword with exact
+    decimal arithmetic. In this mode:
+
+      * ``minimum``, ``maximum``, ``exclusiveMinimum``, ``exclusiveMaximum``,
+        ``multipleOf`` and numeric ``enum``/``const`` values are compared
+        exactly, without converting anything to :class:`float`.
+      * ``int`` is still treated as a JSON number/integer, ``float`` is treated
+        as a JSON number (an integral ``float`` such as ``1.0`` also matches
+        ``integer``), and ``bool`` is never a number.
+      * ``NaN`` and positive/negative infinity are rejected, both in the data
+        and in schema numeric constants.
+      * Generated numeric constants and the ``multipleOf`` check do not depend
+        on the current :class:`decimal.Decimal` context precision and no
+        epsilon is used.
+
+    Code exported with :any:`compile_to_code` keeps the same behavior even when
+    it is executed under a different Decimal context precision.
+
     Exception :any:`JsonSchemaDefinitionException` is raised when generating the
     code fails (bad definition).
 
@@ -288,6 +312,7 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        exact_decimal,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
@@ -307,6 +332,7 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    exact_decimal: bool = False,
 ) -> str:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
@@ -341,6 +367,7 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        exact_decimal,
     )
     return (
         'VERSION = "' + VERSION + '"\n' +
@@ -357,6 +384,7 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    exact_decimal: bool = False,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
@@ -367,6 +395,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        exact_decimal=exact_decimal,
     )
     return resolver, code_generator
 

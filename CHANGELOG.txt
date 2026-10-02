@@ -1,5 +1,6 @@
 === UNRELEASED
 
+* Added `exact_decimal` option to `compile`, `validate` and `compile_to_code` for exact decimal validation of `int`, `float` and `Decimal` numbers (boundaries, `multipleOf`, numeric `enum`/`const`) without float conversion, epsilon or Decimal context precision dependence; booleans are never numbers and NaN/infinity are rejected
 * Fixed property names with `{` or `}` being evaluated as format string in error messages
 * Fixed numeric keywords (minimum, maximum, multipleOf, exclusiveMinimum, exclusiveMaximum) being applied to booleans
 * Fixed `propertyNames: false` crashing on non-object values

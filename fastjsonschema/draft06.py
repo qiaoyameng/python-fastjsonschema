@@ -25,8 +25,9 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
         use_formats=True,
         detailed_exceptions=True,
         fast_fail=True,
+        exact_decimal=False,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail, exact_decimal)
         self._json_keywords_to_function.update((
             ('exclusiveMinimum', self.generate_exclusive_minimum),
             ('exclusiveMaximum', self.generate_exclusive_maximum),
@@ -64,6 +65,8 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
             {'type': 'string'}
             {'type': ['string', 'number']}
         """
+        if self._exact_decimal:
+            return self._generate_type_exact()
         types = enforce_list(self._definition['type'])
         try:
             python_types = ', '.join(JSON_TYPE_TO_PYTHON_TYPE[t] for t in types)
@@ -84,6 +87,10 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
             self.exc('{name} must be {}', ' or '.join(types), rule='type')
 
     def generate_exclusive_minimum(self):
+        if self._exact_decimal:
+            exclusive_minimum = self._numeric_constant(self._definition['exclusiveMinimum'], 'exclusiveMinimum')
+            self._exact_numeric_check(exclusive_minimum, '<=', 'exclusiveMinimum', '{name} must be bigger than {exclusiveMinimum}')
+            return
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
             if not isinstance(self._definition['exclusiveMinimum'], (int, float, decimal.Decimal)):
                 raise JsonSchemaDefinitionException('exclusiveMinimum must be an integer, a float or a decimal')
@@ -91,6 +98,10 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
                 self.exc('{name} must be bigger than {exclusiveMinimum}', rule='exclusiveMinimum')
 
     def generate_exclusive_maximum(self):
+        if self._exact_decimal:
+            exclusive_maximum = self._numeric_constant(self._definition['exclusiveMaximum'], 'exclusiveMaximum')
+            self._exact_numeric_check(exclusive_maximum, '>=', 'exclusiveMaximum', '{name} must be smaller than {exclusiveMaximum}')
+            return
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
             if not isinstance(self._definition['exclusiveMaximum'], (int, float, decimal.Decimal)):
                 raise JsonSchemaDefinitionException('exclusiveMaximum must be an integer, a float or a decimal')
@@ -195,6 +206,8 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
         Only valid value is 42 in this example.
         """
         const = self._definition['const']
+        if self._exact_decimal:
+            self._validate_exact_numbers(const, 'const')
         match = self._enum_value_matches(self._variable, const)
         with self.l('if not ({}):', match):
             self.exc('{name} must be same as const definition: {definition_rule}', rule='const')

@@ -4,6 +4,7 @@ from decimal import Decimal
 import re
 
 from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
+from . import _numeric
 from .indent import indent
 from .ref_resolver import RefResolver
 
@@ -34,12 +35,13 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True, exact_decimal=False):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+        self._exact_decimal = exact_decimal
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -50,6 +52,18 @@ class CodeGenerator:
         self._extra_imports_objects = {
             "Decimal": Decimal,
         }
+        if exact_decimal:
+            self._extra_imports_lines.append(
+                "from fastjsonschema._numeric import "
+                "is_finite_number, is_integer_number, is_multiple, numbers_equal, to_decimal",
+            )
+            self._extra_imports_objects.update(
+                is_finite_number=_numeric.is_finite_number,
+                is_integer_number=_numeric.is_integer_number,
+                is_multiple=_numeric.is_multiple,
+                numbers_equal=_numeric.numbers_equal,
+                to_decimal=_numeric.to_decimal,
+            )
 
         self._variables = {}
         self._scope_stack = []

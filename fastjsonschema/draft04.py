@@ -3,6 +3,7 @@ import re
 
 from .exceptions import JsonSchemaDefinitionException
 from .generator import VALIDATION_EXCEPTIONS, CodeGenerator, enforce_list, repr_default
+from ._numeric import is_finite_number
 
 
 JSON_TYPE_TO_PYTHON_TYPE = {
@@ -34,8 +35,8 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
-        super().__init__(definition, resolver, detailed_exceptions, fast_fail)
+    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True, exact_decimal=False):
+        super().__init__(definition, resolver, detailed_exceptions, fast_fail, exact_decimal)
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
@@ -83,6 +84,8 @@ class CodeGeneratorDraft04(CodeGenerator):
             {'type': 'string'}
             {'type': ['string', 'number']}
         """
+        if self._exact_decimal:
+            return self._generate_type_exact()
         types = enforce_list(self._definition['type'])
         try:
             python_types = ', '.join(JSON_TYPE_TO_PYTHON_TYPE[t] for t in types)
@@ -95,6 +98,55 @@ class CodeGeneratorDraft04(CodeGenerator):
 
         with self.l('if not isinstance({variable}, ({})){}:', python_types, extra):
             self.exc('{name} must be {}', ' or '.join(types), rule='type')
+
+    def _generate_type_exact(self):
+        types = enforce_list(self._definition['type'])
+        unknown = [t for t in types if t not in JSON_TYPE_TO_PYTHON_TYPE]
+        if unknown:
+            raise JsonSchemaDefinitionException('Unknown type')
+
+        checks = []
+        for type_ in types:
+            if type_ == 'boolean':
+                checks.append('isinstance(@@VAR@@, bool)')
+            elif type_ == 'number':
+                checks.append('is_finite_number(@@VAR@@)')
+            elif type_ == 'integer':
+                checks.append('is_integer_number(@@VAR@@)')
+            else:
+                checks.append('isinstance(@@VAR@@, ({}))'.format(JSON_TYPE_TO_PYTHON_TYPE[type_]))
+
+        checks = ' or '.join(checks).replace('@@VAR@@', self._variable)
+        with self.l('if not (' + checks + '):'):
+            self.exc('{name} must be {}', ' or '.join(types), rule='type')
+
+    def _numeric_constant(self, value, keyword):
+        """Validate a schema numeric keyword constant and serialize it for generated code."""
+        if isinstance(value, bool) or not isinstance(value, (int, float, decimal.Decimal)):
+            raise JsonSchemaDefinitionException('{} must be a number'.format(keyword))
+        if self._exact_decimal and not is_finite_number(value):
+            raise JsonSchemaDefinitionException('{} must be a finite number'.format(keyword))
+        return self._numeric_literal(value)
+
+    def _numeric_literal(self, value):
+        if self._exact_decimal:
+            if isinstance(value, decimal.Decimal):
+                return "Decimal(" + repr(str(value)) + ")"
+            if isinstance(value, float):
+                return "Decimal(" + repr(repr(value)) + ")"
+        return repr(value)
+
+    def _exact_numeric_check(self, constant, operator, keyword, message, *message_args):
+        """
+        Generate a finite, bool-excluding numeric check comparing the exact
+        decimal value of the variable against ``constant``.
+        """
+        with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool) and not is_finite_number({variable}):'):
+            self.exc('{name} must be a finite number', rule=keyword)
+        with self.l('if is_finite_number({variable}):'):
+            self.l('{variable}_decimal = to_decimal({variable})')
+            with self.l('if {variable}_decimal {} {}:', operator, constant):
+                self.exc(message, *message_args, rule=keyword)
 
     def generate_enum(self):
         """
@@ -109,6 +161,8 @@ class CodeGeneratorDraft04(CodeGenerator):
         enum = self._definition['enum']
         if not isinstance(enum, (list, tuple)):
             raise JsonSchemaDefinitionException('enum must be an array')
+        if self._exact_decimal:
+            self._validate_exact_numbers(enum, 'enum')
         matches = ' or '.join(self._enum_value_matches(self._variable, value) for value in enum)
         if matches:
             with self.l('if not ({}):', matches):
@@ -120,7 +174,11 @@ class CodeGeneratorDraft04(CodeGenerator):
     def _enum_value_matches(self, var, value):
         if isinstance(value, bool):
             return 'isinstance({var}, bool) and {var} is {val}'.format(var=var, val=repr(value))
+        if self._exact_decimal and isinstance(value, decimal.Decimal):
+            return 'numbers_equal({var}, Decimal({val}))'.format(var=var, val=repr(str(value)))
         if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if self._exact_decimal:
+                return 'numbers_equal({var}, {val})'.format(var=var, val=self._numeric_literal(value))
             return (
                 'isinstance({var}, (int, float)) and not isinstance({var}, bool) and {var} == {val}'
             ).format(var=var, val=repr(value))
@@ -153,6 +211,22 @@ class CodeGeneratorDraft04(CodeGenerator):
                 var=var, size=len(value), checks=item_checks,
             )
         return '{var} == {val}'.format(var=var, val=repr(value))
+
+    def _validate_exact_numbers(self, value, keyword):
+        """Reject NaN and infinity among numeric values of an exact-mode constant."""
+        if isinstance(value, bool):
+            return
+        if isinstance(value, (int, float, decimal.Decimal)):
+            if not is_finite_number(value):
+                raise JsonSchemaDefinitionException(
+                    '{} must not contain NaN or infinite numbers'.format(keyword),
+                )
+        elif isinstance(value, dict):
+            for item in value.values():
+                self._validate_exact_numbers(item, keyword)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                self._validate_exact_numbers(item, keyword)
 
     def generate_all_of(self):
         """
@@ -321,7 +395,8 @@ class CodeGeneratorDraft04(CodeGenerator):
                 self._generate_format(format_, format_ + '_re_pattern', format_regex)
             # Format regex is used only in meta schemas.
             elif format_ == 'regex':
-                self._extra_imports_lines = ['import re']
+                if 'import re' not in self._extra_imports_lines:
+                    self._extra_imports_lines.append('import re')
                 with self.l('try:', optimize=False):
                     self.l('re.compile({variable})')
                 with self.l('except Exception:'):
@@ -336,6 +411,13 @@ class CodeGeneratorDraft04(CodeGenerator):
                 self.exc('{name} must be {}', format_name, rule='format')
 
     def generate_minimum(self):
+        if self._exact_decimal:
+            minimum = self._numeric_constant(self._definition['minimum'], 'minimum')
+            if self._definition.get('exclusiveMinimum', False):
+                self._exact_numeric_check(minimum, '<=', 'minimum', '{name} must be bigger than {minimum}')
+            else:
+                self._exact_numeric_check(minimum, '<', 'minimum', '{name} must be bigger than or equal to {minimum}')
+            return
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
             if not isinstance(self._definition['minimum'], (int, float, decimal.Decimal)):
                 raise JsonSchemaDefinitionException('minimum must be a number')
@@ -347,6 +429,13 @@ class CodeGeneratorDraft04(CodeGenerator):
                     self.exc('{name} must be bigger than or equal to {minimum}', rule='minimum')
 
     def generate_maximum(self):
+        if self._exact_decimal:
+            maximum = self._numeric_constant(self._definition['maximum'], 'maximum')
+            if self._definition.get('exclusiveMaximum', False):
+                self._exact_numeric_check(maximum, '>=', 'maximum', '{name} must be smaller than {maximum}')
+            else:
+                self._exact_numeric_check(maximum, '>', 'maximum', '{name} must be smaller than or equal to {maximum}')
+            return
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
             if not isinstance(self._definition['maximum'], (int, float, decimal.Decimal)):
                 raise JsonSchemaDefinitionException('maximum must be a number')
@@ -358,6 +447,16 @@ class CodeGeneratorDraft04(CodeGenerator):
                     self.exc('{name} must be smaller than or equal to {maximum}', rule='maximum')
 
     def generate_multiple_of(self):
+        if self._exact_decimal:
+            multiple_of = self._numeric_constant(self._definition['multipleOf'], 'multipleOf')
+            if self._definition['multipleOf'] <= 0:
+                raise JsonSchemaDefinitionException('multipleOf must be strictly greater than 0')
+            with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool) and not is_finite_number({variable}):'):
+                self.exc('{name} must be a finite number', rule='multipleOf')
+            with self.l('if is_finite_number({variable}):'):
+                with self.l('if not is_multiple({variable}, {multipleOf}):', multipleOf=multiple_of):
+                    self.exc('{name} must be multiple of {multipleOf}', rule='multipleOf')
+            return
         with self.l('if isinstance({variable}, (int, float, Decimal)) and not isinstance({variable}, bool):'):
             if not isinstance(self._definition['multipleOf'], (int, float, decimal.Decimal)):
                 raise JsonSchemaDefinitionException('multipleOf must be a number')
