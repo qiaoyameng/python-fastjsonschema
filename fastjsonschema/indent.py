@@ -13,6 +13,9 @@ def indent(func):
         merged = optimize and last_line == line
         if merged:
             self._code.pop()
+            line_locations = getattr(self, '_line_locations', None)
+            if line_locations is not None:
+                line_locations.pop()
         self._indent_last_line = line
         return Indent(self, line, merged=merged)
     return wrapper

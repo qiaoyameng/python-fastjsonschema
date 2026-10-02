@@ -1,5 +1,8 @@
 === UNRELEASED
 
+* Added optional source map (`source_map=True` on `compile` and `compile_to_code`) mapping
+  generated code lines back to schema resource URI, JSON pointer and rule; maps can be
+  saved to and loaded from JSON via `SourceMap.save`/`SourceMap.load`
 * Fixed property names with `{` or `}` being evaluated as format string in error messages
 * Fixed numeric keywords (minimum, maximum, multipleOf, exclusiveMinimum, exclusiveMaximum) being applied to booleans
 * Fixed `propertyNames: false` crashing on non-object values

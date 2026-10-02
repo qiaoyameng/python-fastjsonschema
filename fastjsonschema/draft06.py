@@ -25,8 +25,9 @@ class CodeGeneratorDraft06(CodeGeneratorDraft04):
         use_formats=True,
         detailed_exceptions=True,
         fast_fail=True,
+        source_map=False,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail, source_map=source_map)
         self._json_keywords_to_function.update((
             ('exclusiveMinimum', self.generate_exclusive_minimum),
             ('exclusiveMaximum', self.generate_exclusive_maximum),

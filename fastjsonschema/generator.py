@@ -2,10 +2,12 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from decimal import Decimal
 import re
+from urllib.parse import unquote, urljoin, urldefrag
 
 from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
 from .indent import indent
-from .ref_resolver import RefResolver
+from .ref_resolver import RefResolver, get_id, normalize
+from .source_map import SourceLocation, SourceMap, escape_pointer_segment
 
 # Both mean "this subschema did not match": a subschema behind a $ref becomes its own
 # function, which reports through JsonSchemaValuesException while errors are collected.
@@ -16,6 +18,32 @@ def enforce_list(variable):
     if isinstance(variable, list):
         return variable
     return [variable]
+
+
+def _find_definition_path(node, target):
+    """
+    Find the key/index path of ``target`` inside ``node`` by identity.
+
+    Used to derive the JSON pointer of a sub-definition the generator
+    descends into. Returns None when ``target`` is not found.
+    """
+    visited = set()
+
+    def visit(value, path):
+        if value is target:
+            return path
+        if isinstance(value, (dict, list)):
+            if id(value) in visited:
+                return None
+            visited.add(id(value))
+            items = value.items() if isinstance(value, dict) else enumerate(value)
+            for key, item in items:
+                result = visit(item, path + [key])
+                if result is not None:
+                    return result
+        return None
+
+    return visit(node, [])
 
 
 # pylint: disable=too-many-instance-attributes,too-many-public-methods
@@ -34,12 +62,19 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True, source_map=False):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+
+        # Optional source map: for every generated line the schema location
+        # (resource URI, JSON pointer, rule) it was generated from. None when
+        # disabled, so there is no overhead by default.
+        self._line_locations = [] if source_map else None
+        self._location_stack = []
+        self._current_rule = None
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -76,6 +111,25 @@ class CodeGenerator:
         self._needed_validation_functions[self._resolver.get_uri()] = self._resolver.get_scope_name()
 
         self._json_keywords_to_function = OrderedDict()
+
+    @property
+    def source_map(self):
+        """
+        Returns :any:`SourceMap` of the generated code when the generator was
+        created with ``source_map=True``, otherwise an empty map.
+        """
+        self._generate_func_code()
+
+        entries = []
+        if self._line_locations is not None:
+            for lineno, location in enumerate(self._line_locations, start=1):
+                if location is None:
+                    continue
+                if entries and entries[-1][1] == lineno - 1 and entries[-1][2] == location:
+                    entries[-1] = (entries[-1][0], lineno, location)
+                else:
+                    entries.append((lineno, lineno, location))
+        return SourceMap(entries)
 
     @property
     def func_code(self):
@@ -151,14 +205,17 @@ class CodeGenerator:
         """
         self._validation_functions_done.add(uri)
         self.l('')
-        with self._resolver.resolving(uri) as definition:
-            with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
-                if not self._fast_fail:
-                    self.l('errors = []')
-                self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
-                if not self._fast_fail:
-                    self.l('if errors: raise JsonSchemaValuesException(errors)')
-                self.l('return data')
+        document, fragment = urldefrag(uri)
+        pointer = unquote(fragment) if fragment.startswith('/') else ''
+        with self._source_location((document, pointer)):
+            with self._resolver.resolving(uri) as definition:
+                with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
+                    if not self._fast_fail:
+                        self.l('errors = []')
+                    self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
+                    if not self._fast_fail:
+                        self.l('if errors: raise JsonSchemaValuesException(errors)')
+                    self.l('return data')
 
     def generate_func_code_block(self, definition, variable, variable_name, clear_variables=False):
         """
@@ -166,19 +223,66 @@ class CodeGenerator:
 
         Returns the number of validation rules generated as code.
         """
+        location = self._derive_child_location(self._definition, definition)
         backup = self._definition, self._variable, self._variable_name
         self._definition, self._variable, self._variable_name = definition, variable, variable_name
         if clear_variables:
             backup_variables = self._variables
             self._variables = {}
 
-        count = self._generate_func_code_block(definition)
+        with self._source_location(location):
+            count = self._generate_func_code_block(definition)
 
         self._definition, self._variable, self._variable_name = backup
         if clear_variables:
             self._variables = backup_variables
 
         return count
+
+    @contextmanager
+    def _source_location(self, location):
+        """
+        Push a schema location (uri, pointer) while generating code for it.
+        No-op when the source map is disabled or location is None.
+        """
+        if location is None:
+            yield
+            return
+        self._location_stack.append(location)
+        try:
+            yield
+        finally:
+            self._location_stack.pop()
+
+    def _current_location(self):
+        if not self._location_stack:
+            return None
+        uri, pointer = self._location_stack[-1]
+        return SourceLocation(uri, pointer, self._current_rule)
+
+    def _derive_child_location(self, parent, child):
+        """
+        Location of ``child`` definition descending from ``parent`` definition.
+
+        A nested ``$id`` starts a new resource (the URI changes and the
+        pointer restarts); otherwise the JSON pointer of the child inside
+        the parent is appended to the current pointer.
+        """
+        if self._line_locations is None or not self._location_stack:
+            return None
+        uri, pointer = self._location_stack[-1]
+        if isinstance(child, dict):
+            child_id = get_id(child)
+            if isinstance(child_id, str) and child_id:
+                child_document, child_fragment = urldefrag(urljoin(uri, child_id))
+                if child_fragment.startswith('/'):
+                    return (normalize(child_document), unquote(child_fragment))
+                return (normalize(urljoin(uri, child_id)), '')
+            path = _find_definition_path(parent, child)
+            if path is not None:
+                escaped = ''.join('/' + escape_pointer_segment(part) for part in path)
+                return (uri, pointer + escaped)
+        return (uri, pointer)
 
     @contextmanager
     def trial_validation(self):
@@ -206,7 +310,12 @@ class CodeGenerator:
         count = 0
         for key, func in self._json_keywords_to_function.items():
             if key in definition:
-                func()
+                previous_rule = self._current_rule
+                self._current_rule = key
+                try:
+                    func()
+                finally:
+                    self._current_rule = previous_rule
                 count += 1
         return count
 
@@ -229,21 +338,26 @@ class CodeGenerator:
             uri = self._resolver.get_uri()
             if uri not in self._validation_functions_done:
                 self._needed_validation_functions[uri] = name
-            # call validation function
-            assert self._variable_name.startswith("data")
-            path = self._variable_name[4:]
-            name_arg = '(name_prefix or "data") + "{}"'.format(path)
-            if '{' in name_arg or '}' in name_arg:
-                name_arg = name_arg + '.format(**locals())'
-            if self._fast_fail:
-                self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
-            else:
-                # The referenced function collects into its own list, so merge it into ours
-                # instead of letting it abort the validation of the rest of the document.
-                with self.l('try:', optimize=False):
+            previous_rule = self._current_rule
+            self._current_rule = '$ref'
+            try:
+                # call validation function
+                assert self._variable_name.startswith("data")
+                path = self._variable_name[4:]
+                name_arg = '(name_prefix or "data") + "{}"'.format(path)
+                if '{' in name_arg or '}' in name_arg:
+                    name_arg = name_arg + '.format(**locals())'
+                if self._fast_fail:
                     self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
-                with self.l('except JsonSchemaValuesException as e:'):
-                    self.l('errors.extend(e.errors)')
+                else:
+                    # The referenced function collects into its own list, so merge it into ours
+                    # instead of letting it abort the validation of the rest of the document.
+                    with self.l('try:', optimize=False):
+                        self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                    with self.l('except JsonSchemaValuesException as e:'):
+                        self.l('errors.extend(e.errors)')
+            finally:
+                self._current_rule = previous_rule
 
 
     # pylint: disable=invalid-name
@@ -285,6 +399,8 @@ class CodeGenerator:
         line = line.format(*args, **context)
         line = line.replace('\n', '\\n').replace('\r', '\\r')
         self._code.append(spaces + line)
+        if self._line_locations is not None:
+            self._line_locations.append(self._current_location())
         return line
 
     def e(self, string):

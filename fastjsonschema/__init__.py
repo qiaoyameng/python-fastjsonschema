@@ -120,6 +120,7 @@ from .exceptions import (
     JsonSchemaDefinitionException,
 )
 from .ref_resolver import RefResolver
+from .source_map import SourceLocation, SourceMap
 from .version import VERSION
 
 __all__ = (
@@ -128,6 +129,8 @@ __all__ = (
     'JsonSchemaValueException',
     'JsonSchemaValuesException',
     'JsonSchemaDefinitionException',
+    'SourceLocation',
+    'SourceMap',
     'validate',
     'compile',
     'compile_to_code',
@@ -182,7 +185,8 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
-) -> Validator:
+    source_map: bool = False,
+):
     """
     Generates validation function for validating JSON schema passed in ``definition``.
     Example:
@@ -279,6 +283,25 @@ def compile(
     Exception :any:`JsonSchemaValuesException` is raised from generated function when
     validation fails (data do not follow the definition) contatining all the errors
     (when fast_fail is set to `False`).
+
+    When ``source_map`` is set to ``True``, a tuple ``(func, source_map)`` is
+    returned instead of just the validation function. The :any:`SourceMap`
+    maps lines of the generated code (as reported by tracebacks of the
+    compiled function) back to schema locations, so a production stack trace
+    can be translated to the failing schema resource, JSON pointer and rule:
+
+    .. code-block:: python
+
+        validate, source_map = fastjsonschema.compile(definition, source_map=True)
+        try:
+            validate(data)
+        except fastjsonschema.JsonSchemaException as exc:
+            print(source_map.format_traceback(exc.__traceback__))
+
+    The last location is the rule definition that failed; the locations
+    before it are the ``$ref`` call sites the validation passed through,
+    which also identifies the entry point when one generated function is
+    shared by several references.
     """
     resolver, code_generator = _factory(
         definition,
@@ -288,13 +311,16 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        source_map=source_map,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
     exec(code_generator.func_code, global_state)
     func = global_state[resolver.get_scope_name()]
     if formats:
-        return update_wrapper(partial(func, custom_formats=formats), func)
+        func = update_wrapper(partial(func, custom_formats=formats), func)
+    if source_map:
+        return func, code_generator.source_map
     return func
 
 
@@ -307,7 +333,8 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
-) -> str:
+    source_map: bool = False,
+):
     """
     Generates validation code for validating JSON schema passed in ``definition``.
     Example:
@@ -332,6 +359,14 @@ def compile_to_code(
 
     Remote ``$ref`` URIs are resolved the same way as in :any:`compile`; see its
     documentation for ``handlers`` and security considerations.
+
+    When ``source_map`` is set to ``True``, a tuple ``(code, source_map)`` is
+    returned. The :any:`SourceMap` lines match the returned code string, so
+    it can be stored next to the generated file (``source_map.save(path)``)
+    and loaded later (``SourceMap.load(path)``) to translate tracebacks from
+    the deployed validator back to schema locations. The map is plain JSON;
+    loading it executes no code and does not depend on the current working
+    directory.
     """
     _, code_generator = _factory(
         definition,
@@ -341,12 +376,13 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        source_map=source_map,
     )
-    return (
-        'VERSION = "' + VERSION + '"\n' +
-        code_generator.global_state_code + '\n' +
-        code_generator.func_code
-    )
+    header = 'VERSION = "' + VERSION + '"\n' + code_generator.global_state_code + '\n'
+    code = header + code_generator.func_code
+    if source_map:
+        return code, code_generator.source_map.shifted(header.count('\n'))
+    return code
 
 
 def _factory(
@@ -357,6 +393,7 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    source_map: bool = False,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
@@ -367,6 +404,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        source_map=source_map,
     )
     return resolver, code_generator
 
