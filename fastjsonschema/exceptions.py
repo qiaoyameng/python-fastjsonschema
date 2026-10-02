@@ -73,3 +73,35 @@ class JsonSchemaDefinitionException(JsonSchemaException):
     """
     Exception raised by generator of validation function.
     """
+
+
+class JsonSchemaBudgetExceeded(JsonSchemaException):
+    """
+    Exception raised when a validation budget is exhausted.
+
+    This exception is intentionally not a :any:`JsonSchemaValueException` or
+    :any:`JsonSchemaValuesException`, so composition branches such as
+    ``anyOf`` cannot treat an exhausted budget as an ordinary failed schema.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        limit: int,
+        used: int,
+        depth: int,
+        nodes: int,
+        errors: int,
+        budget: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.kind = kind
+        self.limit = limit
+        self.used = used
+        self.depth = depth
+        self.nodes = nodes
+        self.errors = errors
+        self.budget = budget

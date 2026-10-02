@@ -109,6 +109,7 @@ from collections.abc import Callable, Mapping
 from functools import partial, update_wrapper
 from typing import Any
 
+from .budget import ValidationBudget
 from .draft04 import CodeGeneratorDraft04
 from .draft06 import CodeGeneratorDraft06
 from .draft07 import CodeGeneratorDraft07
@@ -118,6 +119,7 @@ from .exceptions import (
     JsonSchemaValueException,
     JsonSchemaValuesException,
     JsonSchemaDefinitionException,
+    JsonSchemaBudgetExceeded,
 )
 from .ref_resolver import RefResolver
 from .version import VERSION
@@ -128,6 +130,8 @@ __all__ = (
     'JsonSchemaValueException',
     'JsonSchemaValuesException',
     'JsonSchemaDefinitionException',
+    'JsonSchemaBudgetExceeded',
+    'ValidationBudget',
     'validate',
     'compile',
     'compile_to_code',
@@ -149,6 +153,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    validation_budget: ValidationBudget | None = None,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -169,7 +174,16 @@ def validate(
     :any:`compile` for details and security considerations when schemas are not
     fully trusted.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(
+        definition,
+        handlers,
+        formats,
+        use_default,
+        use_formats,
+        detailed_exceptions,
+        fast_fail,
+        validation_budget,
+    )(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +196,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    validation_budget: ValidationBudget | None = None,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -279,6 +294,10 @@ def compile(
     Exception :any:`JsonSchemaValuesException` is raised from generated function when
     validation fails (data do not follow the definition) contatining all the errors
     (when fast_fail is set to `False`).
+
+    A :any:`ValidationBudget` can be used to stop validation of very deep or
+    repeatedly visited JSON documents. Each validator call receives an
+    independent budget; the same validator can be reused concurrently.
     """
     resolver, code_generator = _factory(
         definition,
@@ -288,6 +307,7 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        validation_budget,
     )
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
@@ -307,6 +327,7 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    validation_budget: ValidationBudget | None = None,
 ) -> str:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
@@ -341,6 +362,7 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        validation_budget,
     )
     return (
         'VERSION = "' + VERSION + '"\n' +
@@ -357,6 +379,7 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    validation_budget: ValidationBudget | None = None,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
@@ -367,6 +390,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        validation_budget=validation_budget,
     )
     return resolver, code_generator
 

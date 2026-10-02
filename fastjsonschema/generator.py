@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 import re
 
+from .budget import ValidationBudget, _ValidationState
 from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
 from .indent import indent
 from .ref_resolver import RefResolver
@@ -34,12 +35,22 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        detailed_exceptions=True,
+        fast_fail=True,
+        validation_budget=None,
+    ):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
         self._detailed_exceptions = detailed_exceptions
         self._fast_fail = fast_fail
+        if validation_budget is not None and not isinstance(validation_budget, ValidationBudget):
+            raise JsonSchemaDefinitionException('validation_budget must be a ValidationBudget')
+        self._validation_budget = validation_budget
 
         # Any extra library should be here to be imported only once.
         # Lines are imports to be printed in the file and objects
@@ -95,13 +106,17 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
-        return dict(
+        state = dict(
             **self._extra_imports_objects,
             REGEX_PATTERNS=self._compile_regexps,
             re=re,
             JsonSchemaValueException=JsonSchemaValueException,
             JsonSchemaValuesException=JsonSchemaValuesException,
         )
+        if self._validation_budget is not None:
+            state['_ValidationState'] = _ValidationState
+            state['_VALIDATION_BUDGET'] = self._validation_budget
+        return state
 
     @property
     def global_state_code(self):
@@ -111,20 +126,28 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
-        if not self._compile_regexps:
-            return '\n'.join(self._extra_imports_lines + [
-                'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
-                '',
+        lines = list(self._extra_imports_lines)
+        if self._compile_regexps:
+            lines.append('import re')
+        lines.append(
+            'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException'
+        )
+        if self._validation_budget is not None:
+            lines.append(
+                'from fastjsonschema.budget import ValidationBudget, _ValidationState'
+            )
+        lines.extend(['', ''])
+        if self._validation_budget is not None:
+            lines.extend([
+                '_VALIDATION_BUDGET = ' + repr(self._validation_budget),
                 '',
             ])
-        return '\n'.join(self._extra_imports_lines + [
-            'import re',
-            'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
-            '',
-            '',
-            'REGEX_PATTERNS = ' + serialize_regexes(self._compile_regexps),
-            '',
-        ])
+        if self._compile_regexps:
+            lines.extend([
+                'REGEX_PATTERNS = ' + serialize_regexes(self._compile_regexps),
+                '',
+            ])
+        return '\n'.join(lines)
 
 
     def _generate_func_code(self):
@@ -152,7 +175,17 @@ class CodeGenerator:
         self._validation_functions_done.add(uri)
         self.l('')
         with self._resolver.resolving(uri) as definition:
-            with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
+            signature = 'def {}(data, custom_formats={{}}, name_prefix=None'
+            if self._validation_budget is not None:
+                signature += ', _validation_state=None'
+            signature += '):'
+            with self.l(signature, name):
+                if self._validation_budget is not None:
+                    with self.l('if _validation_state is None:'):
+                        self.l('_validation_state = _ValidationState(_VALIDATION_BUDGET)')
+                        self.l('_validation_state.enter_root()')
+                    with self.l('else:'):
+                        self.l('_validation_state.enter_ref()')
                 if not self._fast_fail:
                     self.l('errors = []')
                 self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
@@ -192,6 +225,17 @@ class CodeGenerator:
             yield
         finally:
             self._fast_fail = fast_fail
+
+    @contextmanager
+    def data_child(self, definition=None):
+        if self._validation_budget is None:
+            yield
+        elif isinstance(definition, dict) and '$ref' in definition:
+            with self.l('with _validation_state.ref_child():'):
+                yield
+        else:
+            with self.l('with _validation_state.child():'):
+                yield
 
     def _generate_func_code_block(self, definition):
         if not isinstance(definition, dict):
@@ -235,13 +279,22 @@ class CodeGenerator:
             name_arg = '(name_prefix or "data") + "{}"'.format(path)
             if '{' in name_arg or '}' in name_arg:
                 name_arg = name_arg + '.format(**locals())'
+            state_arg = ', _validation_state' if self._validation_budget is not None else ''
             if self._fast_fail:
-                self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                self.l(
+                    '{}({variable}, custom_formats, {name_arg}' + state_arg + ')',
+                    name,
+                    name_arg=name_arg,
+                )
             else:
                 # The referenced function collects into its own list, so merge it into ours
                 # instead of letting it abort the validation of the rest of the document.
                 with self.l('try:', optimize=False):
-                    self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                    self.l(
+                        '{}({variable}, custom_formats, {name_arg}' + state_arg + ')',
+                        name,
+                        name_arg=name_arg,
+                    )
                 with self.l('except JsonSchemaValuesException as e:'):
                     self.l('errors.extend(e.errors)')
 
@@ -305,20 +358,35 @@ class CodeGenerator:
         """
         if not self._detailed_exceptions:
             if self._fast_fail:
-                self.l('raise JsonSchemaValueException("'+msg+'")', *args)
+                expression = 'JsonSchemaValueException("'+msg+'")'
+                if self._validation_budget is not None:
+                    expression = '_validation_state.error(' + expression + ')'
+                self.l('raise ' + expression, *args)
             else:
-                self.l('errors.append(JsonSchemaValueException("'+msg+'"))', *args)
+                expression = 'JsonSchemaValueException("'+msg+'")'
+                if self._validation_budget is not None:
+                    expression = '_validation_state.error(' + expression + ')'
+                self.l('errors.append(' + expression + ')', *args)
             return
 
         arg = '"'+msg+'"'
         if append_to_msg:
             arg += ' + (' + append_to_msg + ')'
-        # pylint: disable=line-too-long
-        msg = (
-            'raise JsonSchemaValueException('+arg+', value={variable}, name="{name}", definition={definition}, rule={rule})'
-            if self._fast_fail else
-            'errors.append(JsonSchemaValueException('+arg+', value={variable}, name="{name}", definition={definition}, rule={rule}))'
+        expression = (
+            'JsonSchemaValueException('
+            + arg
+            + ', value={variable}, name="{name}", definition={definition}, rule={rule})'
         )
+        if self._fast_fail:
+            if self._validation_budget is not None:
+                msg = 'raise _validation_state.error(' + expression + ')'
+            else:
+                msg = 'raise ' + expression
+        else:
+            if self._validation_budget is not None:
+                msg = 'errors.append(_validation_state.error(' + expression + '))'
+            else:
+                msg = 'errors.append(' + expression + ')'
         definition = self._expand_refs(self._definition)
         definition_rule = self.e(definition.get(rule) if isinstance(definition, dict) else None)
         self.l(msg, *args, definition=repr_default(definition), rule=repr(rule), definition_rule=definition_rule)

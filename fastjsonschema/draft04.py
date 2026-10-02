@@ -34,8 +34,18 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
-        super().__init__(definition, resolver, detailed_exceptions, fast_fail)
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        formats={},
+        use_default=True,
+        use_formats=True,
+        detailed_exceptions=True,
+        fast_fail=True,
+        validation_budget=None,
+    ):
+        super().__init__(definition, resolver, detailed_exceptions, fast_fail, validation_budget)
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
@@ -456,11 +466,15 @@ class CodeGeneratorDraft04(CodeGenerator):
                 for idx, item_definition in enumerate(items_definition):
                     with self.l('if {variable}_len > {}:', idx):
                         self.l('{variable}__{0} = {variable}[{0}]', idx)
-                        self.generate_func_code_block(
-                            item_definition,
-                            '{}__{}'.format(self._variable, idx),
-                            '{}[{}]'.format(self._variable_name, idx),
-                        )
+                        with self.data_child(item_definition):
+                            code_len = len(self._code)
+                            self.generate_func_code_block(
+                                item_definition,
+                                '{}__{}'.format(self._variable, idx),
+                                '{}[{}]'.format(self._variable_name, idx),
+                            )
+                            if len(self._code) == code_len:
+                                self.l('pass')
                     if self._use_default and isinstance(item_definition, dict) and 'default' in item_definition:
                         self.l('else: {variable}.append({})', repr_default(item_definition['default']))
 
@@ -470,25 +484,27 @@ class CodeGeneratorDraft04(CodeGenerator):
                             self.exc('{name} must contain only specified items', rule='items')
                     else:
                         with self.l('for {variable}_x, {variable}_item in enumerate({variable}[{0}:], {0}):', len(items_definition)):
+                            with self.data_child(self._definition['additionalItems']):
+                                code_len = len(self._code)
+                                self.generate_func_code_block(
+                                    self._definition['additionalItems'],
+                                    '{}_item'.format(self._variable),
+                                    '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
+                                )
+                                if len(self._code) == code_len:
+                                    self.l('pass')
+            else:
+                if items_definition:
+                    with self.l('for {variable}_x, {variable}_item in enumerate({variable}):'):
+                        with self.data_child(items_definition):
                             code_len = len(self._code)
                             self.generate_func_code_block(
-                                self._definition['additionalItems'],
+                                items_definition,
                                 '{}_item'.format(self._variable),
                                 '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
                             )
                             if len(self._code) == code_len:
                                 self.l('pass')
-            else:
-                if items_definition:
-                    with self.l('for {variable}_x, {variable}_item in enumerate({variable}):'):
-                        code_len = len(self._code)
-                        self.generate_func_code_block(
-                            items_definition,
-                            '{}_item'.format(self._variable),
-                            '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
-                        )
-                        if len(self._code) == code_len:
-                            self.l('pass')
 
     def generate_min_properties(self):
         self.create_variable_is_dict()
@@ -554,12 +570,16 @@ class CodeGeneratorDraft04(CodeGenerator):
                 with self.l('if "{}" in {variable}_keys:', self.e(key)):
                     self.l('{variable}_keys.remove("{}")', self.e(key))
                     self.l('{variable}__{0} = {variable}["{1}"]', key_name, self.e(key))
-                    self.generate_func_code_block(
-                        prop_definition,
-                        '{}__{}'.format(self._variable, key_name),
-                        '{}.{}'.format(self._variable_name, self.e(key).replace('{', '{{').replace('}', '}}')),
-                        clear_variables=True,
-                    )
+                    with self.data_child(prop_definition):
+                        code_len = len(self._code)
+                        self.generate_func_code_block(
+                            prop_definition,
+                            '{}__{}'.format(self._variable, key_name),
+                            '{}.{}'.format(self._variable_name, self.e(key).replace('{', '{{').replace('}', '}}')),
+                            clear_variables=True,
+                        )
+                        if len(self._code) == code_len:
+                            self.l('pass')
                 if self._use_default and isinstance(prop_definition, dict) and 'default' in prop_definition:
                     self.l('else: {variable}["{}"] = {}', self.e(key), repr_default(prop_definition['default']))
 
@@ -590,12 +610,16 @@ class CodeGeneratorDraft04(CodeGenerator):
                     with self.l('if REGEX_PATTERNS[{}].search({variable}_key):', repr(pattern)):
                         with self.l('if {variable}_key in {variable}_keys:'):
                             self.l('{variable}_keys.remove({variable}_key)')
-                        self.generate_func_code_block(
-                            definition,
-                            '{}_val'.format(self._variable),
-                            '{}.{{{}_key}}'.format(self._variable_name, self._variable),
-                            clear_variables=True,
-                        )
+                        with self.data_child(definition):
+                            code_len = len(self._code)
+                            self.generate_func_code_block(
+                                definition,
+                                '{}_val'.format(self._variable),
+                                '{}.{{{}_key}}'.format(self._variable_name, self._variable),
+                                clear_variables=True,
+                            )
+                            if len(self._code) == code_len:
+                                self.l('pass')
 
     def generate_additional_properties(self):
         """
@@ -624,11 +648,15 @@ class CodeGeneratorDraft04(CodeGenerator):
                 with self.l('for {variable}_key in {variable}_keys:'):
                     with self.l('if {variable}_key not in {}:', properties_keys):
                         self.l('{variable}_value = {variable}.get({variable}_key)')
-                        self.generate_func_code_block(
-                            add_prop_definition,
-                            '{}_value'.format(self._variable),
-                            '{}.{{{}_key}}'.format(self._variable_name, self._variable),
-                        )
+                        with self.data_child(add_prop_definition):
+                            code_len = len(self._code)
+                            self.generate_func_code_block(
+                                add_prop_definition,
+                                '{}_value'.format(self._variable),
+                                '{}.{{{}_key}}'.format(self._variable_name, self._variable),
+                            )
+                            if len(self._code) == code_len:
+                                self.l('pass')
             else:
                 with self.l('if {variable}_keys:'):
                     self.exc('{name} must not contain "+str({variable}_keys)+" properties', rule='additionalProperties')
