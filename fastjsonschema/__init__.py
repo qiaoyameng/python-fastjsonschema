@@ -18,8 +18,9 @@ About
 *****
 
 ``fastjsonschema`` implements validation of JSON documents by JSON schema.
-The library implements JSON schema drafts 04, 06, and 07. The main purpose is
-to have a really fast implementation. See some numbers:
+The library implements JSON schema drafts 04, 06, and 07, plus selected
+draft 2019-09 keywords. The main purpose is to have a really fast
+implementation. See some numbers:
 
  * Probably the most popular, ``jsonschema``, can take up to 5 seconds for valid
    inputs and 1.2 seconds for invalid inputs.
@@ -74,6 +75,11 @@ Note that there are some differences compared to JSON schema standard:
    as well. When you want to use dollar as regular character, you have to escape it (``\$``).
  * JSON schema says you can use keyword ``default`` for providing default values. This implementation
    uses that and always returns transformed input data.
+ * Draft 2019-09 support is selective. In particular, ``unevaluatedProperties``
+   is supported with annotations from ``properties``, ``patternProperties``,
+   ``$ref``, ``allOf``, ``anyOf``, ``oneOf``, ``if``/``then``/``else``, and
+   nested ``unevaluatedProperties``; other draft 2019-09 keywords are not
+   implied to be complete.
 
 Usage
 *****
@@ -209,9 +215,10 @@ def compile(
         data = validate({})
         assert data == {'a': 42}
 
-    Supported implementations are draft-04, draft-06 and draft-07. Which version
-    should be used is determined by `$draft` in your ``definition``. When not
-    specified, the latest implementation is used (draft-07).
+    Supported implementations are draft-04, draft-06, draft-07, and selected
+    draft 2019-09 keywords. Which version should be used is determined by
+    `$schema` in your ``definition``. When not specified, the latest
+    implementation is used (the implemented draft 2019-09 subset).
 
     .. code-block:: python
 

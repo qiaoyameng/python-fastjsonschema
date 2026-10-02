@@ -171,7 +171,10 @@ class CodeGeneratorDraft04(CodeGenerator):
         Valid values for this definition are 5, 6, 7, ... but not 4 or 'abc' for example.
         """
         for definition_item in self._definition['allOf']:
-            self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+            with self.evaluation_guard():
+                self.generate_func_code_block(
+                    definition_item, self._variable, self._variable_name, clear_variables=True
+                )
 
     def generate_any_of(self):
         """
@@ -192,12 +195,17 @@ class CodeGeneratorDraft04(CodeGenerator):
         self._any_or_one_of_count += 1
         count = self._any_or_one_of_count
         self.l('{variable}_any_of_count{count} = 0', count=count)
+        parent_evaluated = self._evaluated_stack[-1]
         for definition_item in self._definition['anyOf']:
             # When we know it's passing (at least once), we do not need to do another expensive try-except.
             with self.l('if not {variable}_any_of_count{count}:', count=count, optimize=False):
                 with self.l('try:', optimize=False):
-                    with self.trial_validation():
-                        self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+                    with self.trial_validation(), self.evaluation_scope() as evaluated:
+                        with self.evaluated_name(evaluated):
+                            self.generate_func_code_block(
+                                definition_item, self._variable, self._variable_name, clear_variables=True
+                            )
+                            self.l('{}.update({})', parent_evaluated, evaluated)
                     self.l('{variable}_any_of_count{count} += 1', count=count)
                 self.l('except {}: pass', VALIDATION_EXCEPTIONS)
 
@@ -223,16 +231,24 @@ class CodeGeneratorDraft04(CodeGenerator):
         self._any_or_one_of_count += 1
         count = self._any_or_one_of_count
         self.l('{variable}_one_of_count{count} = 0', count=count)
+        evaluated = self._evaluated_stack[-1]
+        self.l('{variable}_one_of_evaluated{count} = set({evaluated})', count=count, evaluated=evaluated)
+        parent_evaluated = self._evaluated_stack[-1]
         for definition_item in self._definition['oneOf']:
             # When we know it's failing (one of means exactly once), we do not need to do another expensive try-except.
             with self.l('if {variable}_one_of_count{count} < 2:', count=count, optimize=False):
                 with self.l('try:', optimize=False):
-                    with self.trial_validation():
-                        self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+                    with self.trial_validation(), self.evaluation_scope() as evaluated:
+                        with self.evaluated_name(evaluated):
+                            self.generate_func_code_block(
+                                definition_item, self._variable, self._variable_name, clear_variables=True
+                            )
+                            self.l('{}.update({})', parent_evaluated, evaluated)
                     self.l('{variable}_one_of_count{count} += 1', count=count)
                 self.l('except {}: pass', VALIDATION_EXCEPTIONS)
 
         with self.l('if {variable}_one_of_count{count} != 1:', count=count):
+            self.l('{evaluated}.intersection_update({variable}_one_of_evaluated{count})', evaluated=evaluated, count=count)
             dynamic = '" (" + str({variable}_one_of_count{}) + " matches found)"'
             self.exc('{name} must be valid exactly by one definition', count, append_to_msg=dynamic, rule='oneOf')
 
@@ -259,7 +275,7 @@ class CodeGeneratorDraft04(CodeGenerator):
         else:
             with self.l('try:', optimize=False):
                 code_len = len(self._code)
-                with self.trial_validation():
+                with self.trial_validation(), self.evaluation_scope():
                     self.generate_func_code_block(not_definition, self._variable, self._variable_name, clear_variables=True)
                 if len(self._code) == code_len:
                     self.l('pass')
@@ -456,11 +472,12 @@ class CodeGeneratorDraft04(CodeGenerator):
                 for idx, item_definition in enumerate(items_definition):
                     with self.l('if {variable}_len > {}:', idx):
                         self.l('{variable}__{0} = {variable}[{0}]', idx)
-                        self.generate_func_code_block(
-                            item_definition,
-                            '{}__{}'.format(self._variable, idx),
-                            '{}[{}]'.format(self._variable_name, idx),
-                        )
+                        with self.evaluation_scope():
+                            self.generate_func_code_block(
+                                item_definition,
+                                '{}__{}'.format(self._variable, idx),
+                                '{}[{}]'.format(self._variable_name, idx),
+                            )
                     if self._use_default and isinstance(item_definition, dict) and 'default' in item_definition:
                         self.l('else: {variable}.append({})', repr_default(item_definition['default']))
 
@@ -471,24 +488,26 @@ class CodeGeneratorDraft04(CodeGenerator):
                     else:
                         with self.l('for {variable}_x, {variable}_item in enumerate({variable}[{0}:], {0}):', len(items_definition)):
                             code_len = len(self._code)
+                            with self.evaluation_scope():
+                                self.generate_func_code_block(
+                                    self._definition['additionalItems'],
+                                    '{}_item'.format(self._variable),
+                                    '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
+                                )
+                                if len(self._code) == code_len:
+                                    self.l('pass')
+            else:
+                if items_definition:
+                    with self.l('for {variable}_x, {variable}_item in enumerate({variable}):'):
+                        code_len = len(self._code)
+                        with self.evaluation_scope():
                             self.generate_func_code_block(
-                                self._definition['additionalItems'],
+                                items_definition,
                                 '{}_item'.format(self._variable),
                                 '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
                             )
                             if len(self._code) == code_len:
                                 self.l('pass')
-            else:
-                if items_definition:
-                    with self.l('for {variable}_x, {variable}_item in enumerate({variable}):'):
-                        code_len = len(self._code)
-                        self.generate_func_code_block(
-                            items_definition,
-                            '{}_item'.format(self._variable),
-                            '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
-                        )
-                        if len(self._code) == code_len:
-                            self.l('pass')
 
     def generate_min_properties(self):
         self.create_variable_is_dict()
@@ -552,16 +571,26 @@ class CodeGeneratorDraft04(CodeGenerator):
                 if not isinstance(prop_definition, (dict, bool)):
                     raise JsonSchemaDefinitionException('{}[{}] must be object'.format(self._variable, key_name))
                 with self.l('if "{}" in {variable}_keys:', self.e(key)):
-                    self.l('{variable}_keys.remove("{}")', self.e(key))
-                    self.l('{variable}__{0} = {variable}["{1}"]', key_name, self.e(key))
-                    self.generate_func_code_block(
-                        prop_definition,
-                        '{}__{}'.format(self._variable, key_name),
-                        '{}.{}'.format(self._variable_name, self.e(key).replace('{', '{{').replace('}', '}}')),
-                        clear_variables=True,
-                    )
+                    with self.evaluation_scope() as property_evaluated:
+                        with self.evaluation_guard(
+                            property_evaluated,
+                            mark_to=self._evaluated_stack[-2],
+                            mark_value=self.e(key),
+                        ):
+                            self.l('{variable}_keys.remove("{}")', self.e(key))
+                            self.l('{variable}__{0} = {variable}["{1}"]', key_name, self.e(key))
+                            self.generate_func_code_block(
+                                prop_definition,
+                                '{}__{}'.format(self._variable, key_name),
+                                '{}.{}'.format(self._variable_name, self.e(key).replace('{', '{{').replace('}', '}}')),
+                                clear_variables=True,
+                            )
                 if self._use_default and isinstance(prop_definition, dict) and 'default' in prop_definition:
-                    self.l('else: {variable}["{}"] = {}', self.e(key), repr_default(prop_definition['default']))
+                    self.l(
+                        'else: {variable}["{}"] = {}; {}.add("{}")',
+                        self.e(key), repr_default(prop_definition['default']),
+                        self._evaluated_stack[-1], self.e(key),
+                    )
 
     def generate_pattern_properties(self):
         """
@@ -588,14 +617,20 @@ class CodeGeneratorDraft04(CodeGenerator):
             with self.l('for {variable}_key, {variable}_val in {variable}.items():'):
                 for pattern, definition in self._definition['patternProperties'].items():
                     with self.l('if REGEX_PATTERNS[{}].search({variable}_key):', repr(pattern)):
-                        with self.l('if {variable}_key in {variable}_keys:'):
-                            self.l('{variable}_keys.remove({variable}_key)')
-                        self.generate_func_code_block(
-                            definition,
-                            '{}_val'.format(self._variable),
-                            '{}.{{{}_key}}'.format(self._variable_name, self._variable),
-                            clear_variables=True,
-                        )
+                        with self.evaluation_scope() as property_evaluated:
+                            with self.evaluation_guard(
+                                property_evaluated,
+                                mark_to=self._evaluated_stack[-2],
+                                mark_expression='{variable}_key',
+                            ):
+                                with self.l('if {variable}_key in {variable}_keys:'):
+                                    self.l('{variable}_keys.remove({variable}_key)')
+                                self.generate_func_code_block(
+                                    definition,
+                                    '{}_val'.format(self._variable),
+                                    '{}.{{{}_key}}'.format(self._variable_name, self._variable),
+                                    clear_variables=True,
+                                )
 
     def generate_additional_properties(self):
         """
@@ -624,11 +659,12 @@ class CodeGeneratorDraft04(CodeGenerator):
                 with self.l('for {variable}_key in {variable}_keys:'):
                     with self.l('if {variable}_key not in {}:', properties_keys):
                         self.l('{variable}_value = {variable}.get({variable}_key)')
-                        self.generate_func_code_block(
-                            add_prop_definition,
-                            '{}_value'.format(self._variable),
-                            '{}.{{{}_key}}'.format(self._variable_name, self._variable),
-                        )
+                        with self.evaluation_scope():
+                            self.generate_func_code_block(
+                                add_prop_definition,
+                                '{}_value'.format(self._variable),
+                                '{}.{{{}_key}}'.format(self._variable_name, self._variable),
+                            )
             else:
                 with self.l('if {variable}_keys:'):
                     self.exc('{name} must not contain "+str({variable}_keys)+" properties', rule='additionalProperties')
@@ -667,8 +703,9 @@ class CodeGeneratorDraft04(CodeGenerator):
                                 self.exc('{name} missing dependency {} for {}', self.e(value), self.e(key), rule='dependencies')
                     else:
                         code_len = len(self._code)
-                        self.generate_func_code_block(values, self._variable, self._variable_name, clear_variables=True)
-                        if len(self._code) == code_len:
-                            self.l('pass')
+                        with self.evaluation_scope():
+                            self.generate_func_code_block(values, self._variable, self._variable_name, clear_variables=True)
+                            if len(self._code) == code_len:
+                                self.l('pass')
             if is_empty:
                 self.l('pass')

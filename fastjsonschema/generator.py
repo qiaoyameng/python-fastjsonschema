@@ -12,6 +12,35 @@ from .ref_resolver import RefResolver
 VALIDATION_EXCEPTIONS = '(JsonSchemaValueException, JsonSchemaValuesException)'
 
 
+EVALUATION_GUARD_CODE = '''class _EvaluationGuard:
+    __slots__ = ("_evaluated", "_snapshot", "_errors", "_error_count", "_mark_to", "_mark_value")
+
+    def __init__(self, evaluated, errors=None, error_count=None, mark_to=None, mark_value=None):
+        self._evaluated = evaluated
+        self._snapshot = set(evaluated)
+        self._errors = errors
+        self._error_count = error_count
+        self._mark_to = mark_to
+        self._mark_value = mark_value
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        failed = exc_type is not None or (
+            self._errors is not None and len(self._errors) != self._error_count
+        )
+        if failed:
+            self._evaluated.intersection_update(self._snapshot)
+        elif self._mark_to is not None:
+            self._mark_to.add(self._mark_value)
+        return False
+'''
+_guard_namespace = {}
+exec(EVALUATION_GUARD_CODE, _guard_namespace)
+_EvaluationGuard = _guard_namespace['_EvaluationGuard']
+
+
 def enforce_list(variable):
     if isinstance(variable, list):
         return variable
@@ -52,6 +81,8 @@ class CodeGenerator:
         }
 
         self._variables = {}
+        self._evaluated_stack = ['_evaluated']
+        self._evaluated_counter = 0
         self._scope_stack = []
         self._scope_counter = 0
         self._last_closed_scope = None
@@ -101,6 +132,7 @@ class CodeGenerator:
             re=re,
             JsonSchemaValueException=JsonSchemaValueException,
             JsonSchemaValuesException=JsonSchemaValuesException,
+            _EvaluationGuard=_EvaluationGuard,
         )
 
     @property
@@ -111,17 +143,16 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
-        if not self._compile_regexps:
-            return '\n'.join(self._extra_imports_lines + [
-                'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
-                '',
-                '',
-            ])
-        return '\n'.join(self._extra_imports_lines + [
-            'import re',
+        imports = self._extra_imports_lines + [
             'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
             '',
             '',
+            EVALUATION_GUARD_CODE,
+        ]
+        if not self._compile_regexps:
+            return '\n'.join(imports)
+        return '\n'.join(imports + [
+            'import re',
             'REGEX_PATTERNS = ' + serialize_regexes(self._compile_regexps),
             '',
         ])
@@ -152,12 +183,14 @@ class CodeGenerator:
         self._validation_functions_done.add(uri)
         self.l('')
         with self._resolver.resolving(uri) as definition:
-            with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
+            with self.l('def {}(data, custom_formats={{}}, name_prefix=None, _evaluated_parent=None):', name):
                 if not self._fast_fail:
                     self.l('errors = []')
+                self.l('_evaluated = set(_evaluated_parent) if _evaluated_parent is not None else set()')
                 self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
                 if not self._fast_fail:
                     self.l('if errors: raise JsonSchemaValuesException(errors)')
+                self.l('if _evaluated_parent is not None: _evaluated_parent.update(_evaluated)')
                 self.l('return data')
 
     def generate_func_code_block(self, definition, variable, variable_name, clear_variables=False):
@@ -192,6 +225,43 @@ class CodeGenerator:
             yield
         finally:
             self._fast_fail = fast_fail
+
+    @contextmanager
+    def evaluation_guard(self, evaluated_name=None, mark_to=None, mark_value=None, mark_expression=None):
+        evaluated_name = evaluated_name or self._evaluated_stack[-1]
+        arguments = [evaluated_name]
+        if not self._fast_fail:
+            arguments.extend(['errors', 'len(errors)'])
+        if mark_to is not None:
+            arguments.append('mark_to={}'.format(mark_to))
+            value = mark_expression if mark_expression is not None else repr(mark_value)
+            if mark_expression is None:
+                value = value.replace('{', '{{').replace('}', '}}')
+            arguments.append('mark_value={}'.format(
+                value
+            ))
+        line = 'with _EvaluationGuard({}):'.format(', '.join(arguments))
+        with self.l(line, optimize=False):
+            yield
+
+    @contextmanager
+    def evaluation_scope(self):
+        self._evaluated_counter += 1
+        evaluated_name = '_evaluated_{}'.format(self._evaluated_counter)
+        self.l('{} = set()', evaluated_name)
+        self._evaluated_stack.append(evaluated_name)
+        try:
+            yield evaluated_name
+        finally:
+            self._evaluated_stack.pop()
+
+    @contextmanager
+    def evaluated_name(self, evaluated_name):
+        self._evaluated_stack.append(evaluated_name)
+        try:
+            yield
+        finally:
+            self._evaluated_stack.pop()
 
     def _generate_func_code_block(self, definition):
         if not isinstance(definition, dict):
@@ -236,12 +306,18 @@ class CodeGenerator:
             if '{' in name_arg or '}' in name_arg:
                 name_arg = name_arg + '.format(**locals())'
             if self._fast_fail:
-                self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                self.l(
+                    '{}({variable}, custom_formats, {name_arg}, _evaluated_parent={})',
+                    name, self._evaluated_stack[-1], name_arg=name_arg,
+                )
             else:
                 # The referenced function collects into its own list, so merge it into ours
                 # instead of letting it abort the validation of the rest of the document.
                 with self.l('try:', optimize=False):
-                    self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                    self.l(
+                        '{}({variable}, custom_formats, {name_arg}, _evaluated_parent={})',
+                        name, self._evaluated_stack[-1], name_arg=name_arg,
+                    )
                 with self.l('except JsonSchemaValuesException as e:'):
                     self.l('errors.extend(e.errors)')
 

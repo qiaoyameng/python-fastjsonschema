@@ -57,41 +57,45 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
 
         Valid values are any between -10 and 0 or any multiplication of two.
         """
+        parent_evaluated = self._evaluated_stack[-1]
         with self.l('try:', optimize=False):
-            code_len = len(self._code)
-            with self.trial_validation():
+            with self.trial_validation(), self.evaluation_scope() as evaluated:
+                code_len = len(self._code)
                 self.generate_func_code_block(
                     self._definition['if'],
                     self._variable,
                     self._variable_name,
                     clear_variables=True
                 )
-            if len(self._code) == code_len:
-                self.l('pass')
-        with self.l('except {}:', VALIDATION_EXCEPTIONS):
-            if 'else' in self._definition:
-                code_len = len(self._code)
-                self.generate_func_code_block(
-                    self._definition['else'],
-                    self._variable,
-                    self._variable_name,
-                    clear_variables=True
-                )
                 if len(self._code) == code_len:
                     self.l('pass')
+                self.l('{}.update({})', parent_evaluated, evaluated)
+        with self.l('except {}:', VALIDATION_EXCEPTIONS):
+            if 'else' in self._definition:
+                with self.evaluation_guard():
+                    code_len = len(self._code)
+                    self.generate_func_code_block(
+                        self._definition['else'],
+                        self._variable,
+                        self._variable_name,
+                        clear_variables=True
+                    )
+                    if len(self._code) == code_len:
+                        self.l('pass')
             else:
                 self.l('pass')
         if 'then' in self._definition:
             with self.l('else:'):
-                code_len = len(self._code)
-                self.generate_func_code_block(
-                    self._definition['then'],
-                    self._variable,
-                    self._variable_name,
-                    clear_variables=True
-                )
-                if len(self._code) == code_len:
-                    self.l('pass')
+                with self.evaluation_guard():
+                    code_len = len(self._code)
+                    self.generate_func_code_block(
+                        self._definition['then'],
+                        self._variable,
+                        self._variable_name,
+                        clear_variables=True
+                    )
+                    if len(self._code) == code_len:
+                        self.l('pass')
 
     def generate_content_encoding(self):
         """

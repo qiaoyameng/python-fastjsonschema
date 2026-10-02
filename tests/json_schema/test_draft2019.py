@@ -37,7 +37,6 @@ def pytest_generate_tests(metafunc):
             'minContains.json',
             'recursiveRef.json',
             'unevaluatedItems.json',
-            'unevaluatedProperties.json',
             'vocabulary.json',
         ],
     )

@@ -1,5 +1,6 @@
 === UNRELEASED
 
+* Added draft 2019-09 `unevaluatedProperties` with evaluated-property annotations from properties, patternProperties, $ref, allOf, anyOf, oneOf and if/then/else
 * Fixed property names with `{` or `}` being evaluated as format string in error messages
 * Fixed numeric keywords (minimum, maximum, multipleOf, exclusiveMinimum, exclusiveMaximum) being applied to booleans
 * Fixed `propertyNames: false` crashing on non-object values
