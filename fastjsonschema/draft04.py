@@ -34,8 +34,8 @@ class CodeGeneratorDraft04(CodeGenerator):
         'uri': r'^\w+:(\/?\/?)[^\s]+\Z',
     }
 
-    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True):
-        super().__init__(definition, resolver, detailed_exceptions, fast_fail)
+    def __init__(self, definition, resolver=None, formats={}, use_default=True, use_formats=True, detailed_exceptions=True, fast_fail=True, location_map=False):
+        super().__init__(definition, resolver, detailed_exceptions, fast_fail, location_map)
         self._custom_formats = formats
         self._use_formats = use_formats
         self._use_default = use_default
@@ -170,8 +170,14 @@ class CodeGeneratorDraft04(CodeGenerator):
 
         Valid values for this definition are 5, 6, 7, ... but not 4 or 'abc' for example.
         """
-        for definition_item in self._definition['allOf']:
-            self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+        for index, definition_item in enumerate(self._definition['allOf']):
+            self.generate_func_code_block(
+                definition_item,
+                self._variable,
+                self._variable_name,
+                clear_variables=True,
+                schema_position=self.child_position('allOf', index),
+            )
 
     def generate_any_of(self):
         """
@@ -192,12 +198,18 @@ class CodeGeneratorDraft04(CodeGenerator):
         self._any_or_one_of_count += 1
         count = self._any_or_one_of_count
         self.l('{variable}_any_of_count{count} = 0', count=count)
-        for definition_item in self._definition['anyOf']:
+        for index, definition_item in enumerate(self._definition['anyOf']):
             # When we know it's passing (at least once), we do not need to do another expensive try-except.
             with self.l('if not {variable}_any_of_count{count}:', count=count, optimize=False):
                 with self.l('try:', optimize=False):
                     with self.trial_validation():
-                        self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+                        self.generate_func_code_block(
+                            definition_item,
+                            self._variable,
+                            self._variable_name,
+                            clear_variables=True,
+                            schema_position=self.child_position('anyOf', index),
+                        )
                     self.l('{variable}_any_of_count{count} += 1', count=count)
                 self.l('except {}: pass', VALIDATION_EXCEPTIONS)
 
@@ -223,12 +235,18 @@ class CodeGeneratorDraft04(CodeGenerator):
         self._any_or_one_of_count += 1
         count = self._any_or_one_of_count
         self.l('{variable}_one_of_count{count} = 0', count=count)
-        for definition_item in self._definition['oneOf']:
+        for index, definition_item in enumerate(self._definition['oneOf']):
             # When we know it's failing (one of means exactly once), we do not need to do another expensive try-except.
             with self.l('if {variable}_one_of_count{count} < 2:', count=count, optimize=False):
                 with self.l('try:', optimize=False):
                     with self.trial_validation():
-                        self.generate_func_code_block(definition_item, self._variable, self._variable_name, clear_variables=True)
+                        self.generate_func_code_block(
+                            definition_item,
+                            self._variable,
+                            self._variable_name,
+                            clear_variables=True,
+                            schema_position=self.child_position('oneOf', index),
+                        )
                     self.l('{variable}_one_of_count{count} += 1', count=count)
                 self.l('except {}: pass', VALIDATION_EXCEPTIONS)
 
@@ -260,7 +278,13 @@ class CodeGeneratorDraft04(CodeGenerator):
             with self.l('try:', optimize=False):
                 code_len = len(self._code)
                 with self.trial_validation():
-                    self.generate_func_code_block(not_definition, self._variable, self._variable_name, clear_variables=True)
+                    self.generate_func_code_block(
+                        not_definition,
+                        self._variable,
+                        self._variable_name,
+                        clear_variables=True,
+                        schema_position=self.child_position('not'),
+                    )
                 if len(self._code) == code_len:
                     self.l('pass')
             self.l('except {}: pass', VALIDATION_EXCEPTIONS)
@@ -460,6 +484,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                             item_definition,
                             '{}__{}'.format(self._variable, idx),
                             '{}[{}]'.format(self._variable_name, idx),
+                            schema_position=self.child_position('items', idx),
                         )
                     if self._use_default and isinstance(item_definition, dict) and 'default' in item_definition:
                         self.l('else: {variable}.append({})', repr_default(item_definition['default']))
@@ -475,6 +500,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                                 self._definition['additionalItems'],
                                 '{}_item'.format(self._variable),
                                 '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
+                                schema_position=self.child_position('additionalItems'),
                             )
                             if len(self._code) == code_len:
                                 self.l('pass')
@@ -486,6 +512,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                             items_definition,
                             '{}_item'.format(self._variable),
                             '{}[{{{}_x}}]'.format(self._variable_name, self._variable),
+                            schema_position=self.child_position('items'),
                         )
                         if len(self._code) == code_len:
                             self.l('pass')
@@ -559,6 +586,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                         '{}__{}'.format(self._variable, key_name),
                         '{}.{}'.format(self._variable_name, self.e(key).replace('{', '{{').replace('}', '}}')),
                         clear_variables=True,
+                        schema_position=self.child_position('properties', key, definition=prop_definition),
                     )
                 if self._use_default and isinstance(prop_definition, dict) and 'default' in prop_definition:
                     self.l('else: {variable}["{}"] = {}', self.e(key), repr_default(prop_definition['default']))
@@ -595,6 +623,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                             '{}_val'.format(self._variable),
                             '{}.{{{}_key}}'.format(self._variable_name, self._variable),
                             clear_variables=True,
+                            schema_position=self.child_position('patternProperties', pattern, definition=definition),
                         )
 
     def generate_additional_properties(self):
@@ -628,6 +657,7 @@ class CodeGeneratorDraft04(CodeGenerator):
                             add_prop_definition,
                             '{}_value'.format(self._variable),
                             '{}.{{{}_key}}'.format(self._variable_name, self._variable),
+                            schema_position=self.child_position('additionalProperties'),
                         )
             else:
                 with self.l('if {variable}_keys:'):
@@ -667,7 +697,13 @@ class CodeGeneratorDraft04(CodeGenerator):
                                 self.exc('{name} missing dependency {} for {}', self.e(value), self.e(key), rule='dependencies')
                     else:
                         code_len = len(self._code)
-                        self.generate_func_code_block(values, self._variable, self._variable_name, clear_variables=True)
+                        self.generate_func_code_block(
+                            values,
+                            self._variable,
+                            self._variable_name,
+                            clear_variables=True,
+                            schema_position=self.child_position('dependencies', key, definition=values),
+                        )
                         if len(self._code) == code_len:
                             self.l('pass')
             if is_empty:

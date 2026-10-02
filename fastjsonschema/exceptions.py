@@ -35,6 +35,8 @@ class JsonSchemaValueException(JsonSchemaException):
         name: str | None = None,
         definition: Any = None,
         rule: str | None = None,
+        rule_id: int | None = None,
+        ref_path: tuple[int, ...] = (),
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -42,6 +44,8 @@ class JsonSchemaValueException(JsonSchemaException):
         self.name = name
         self.definition = definition
         self.rule = rule
+        self.rule_id = rule_id
+        self.ref_path = tuple(ref_path)
 
     @property
     def path(self) -> list[str]:

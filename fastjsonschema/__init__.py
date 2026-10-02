@@ -120,6 +120,16 @@ from .exceptions import (
     JsonSchemaDefinitionException,
 )
 from .ref_resolver import RefResolver
+from .source_map import (
+    ExceptionLocation,
+    LOCATION_MAP_ATTRIBUTE,
+    LocationMap,
+    RuleLocation,
+    ReferenceLocation,
+    SchemaPosition,
+    SourceMap,
+    get_exception_location,
+)
 from .version import VERSION
 
 __all__ = (
@@ -128,9 +138,16 @@ __all__ = (
     'JsonSchemaValueException',
     'JsonSchemaValuesException',
     'JsonSchemaDefinitionException',
+    'ExceptionLocation',
+    'LocationMap',
+    'ReferenceLocation',
+    'RuleLocation',
+    'SchemaPosition',
+    'SourceMap',
     'validate',
     'compile',
     'compile_to_code',
+    'get_exception_location',
 )
 
 
@@ -149,6 +166,7 @@ def validate(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    location_map: bool = False,
 ) -> Any:
     """
     Validation function for lazy programmers or for use cases when you need
@@ -169,7 +187,16 @@ def validate(
     :any:`compile` for details and security considerations when schemas are not
     fully trusted.
     """
-    return compile(definition, handlers, formats, use_default, use_formats, detailed_exceptions, fast_fail)(data)
+    return compile(
+        definition,
+        handlers,
+        formats,
+        use_default,
+        use_formats,
+        detailed_exceptions,
+        fast_fail,
+        location_map,
+    )(data)
 
 
 #TODO: Change use_default to False when upgrading to version 3.
@@ -182,6 +209,7 @@ def compile(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    location_map: bool = False,
 ) -> Validator:
     """
     Generates validation function for validating JSON schema passed in ``definition``.
@@ -279,6 +307,11 @@ def compile(
     Exception :any:`JsonSchemaValuesException` is raised from generated function when
     validation fails (data do not follow the definition) contatining all the errors
     (when fast_fail is set to `False`).
+
+    When ``location_map`` is enabled, the returned validator has an attached
+    :any:`LocationMap`. :any:`get_exception_location` can then resolve a raised
+    exception to a schema resource URI, JSON Pointer, rule name, and the dynamic
+    ``$ref`` path taken during validation.
     """
     resolver, code_generator = _factory(
         definition,
@@ -288,11 +321,18 @@ def compile(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        location_map,
     )
+    func_code = code_generator.func_code
     global_state = code_generator.global_state
     # Do not pass local state so it can recursively call itself.
-    exec(code_generator.func_code, global_state)
+    exec(func_code, global_state)
     func = global_state[resolver.get_scope_name()]
+    if location_map:
+        source_map = code_generator.location_map
+        source_map.set_code(func_code)
+        for name in source_map.functions:
+            setattr(global_state[name], LOCATION_MAP_ATTRIBUTE, source_map)
     if formats:
         return update_wrapper(partial(func, custom_formats=formats), func)
     return func
@@ -307,7 +347,8 @@ def compile_to_code(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
-) -> str:
+    location_map: bool = False,
+) -> str | tuple[str, LocationMap]:
     """
     Generates validation code for validating JSON schema passed in ``definition``.
     Example:
@@ -332,6 +373,10 @@ def compile_to_code(
 
     Remote ``$ref`` URIs are resolved the same way as in :any:`compile`; see its
     documentation for ``handlers`` and security considerations.
+
+    When ``location_map`` is enabled, the return value is a ``(code, map)`` pair.
+    The map is plain JSON data represented by :any:`LocationMap` and does not
+    contain or execute generated Python code.
     """
     _, code_generator = _factory(
         definition,
@@ -341,12 +386,19 @@ def compile_to_code(
         use_formats,
         detailed_exceptions,
         fast_fail,
+        location_map,
     )
-    return (
+    code = (
         'VERSION = "' + VERSION + '"\n' +
         code_generator.global_state_code + '\n' +
         code_generator.func_code
     )
+    if not location_map:
+        return code
+    source_map = code_generator.location_map
+    source_map.shift_lines(code.count('\n') - code_generator.func_code.count('\n'))
+    source_map.set_code(code)
+    return code, source_map
 
 
 def _factory(
@@ -357,6 +409,7 @@ def _factory(
     use_formats: bool = True,
     detailed_exceptions: bool = True,
     fast_fail: bool = True,
+    location_map: bool = False,
 ) -> tuple[RefResolver, CodeGeneratorDraft04]:
     resolver = RefResolver.from_schema(definition, handlers=handlers, store={})
     code_generator = _get_code_generator_class(definition)(
@@ -367,6 +420,7 @@ def _factory(
         use_formats=use_formats,
         detailed_exceptions=detailed_exceptions,
         fast_fail=fast_fail,
+        location_map=location_map,
     )
     return resolver, code_generator
 

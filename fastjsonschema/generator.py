@@ -2,10 +2,12 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from decimal import Decimal
 import re
+from urllib.parse import urldefrag, urljoin
 
 from .exceptions import JsonSchemaValueException, JsonSchemaValuesException, JsonSchemaDefinitionException
 from .indent import indent
-from .ref_resolver import RefResolver
+from .ref_resolver import RefResolver, normalize, resolve_path, resolve_remote
+from .source_map import LocationMap, SchemaPosition
 
 # Both mean "this subschema did not match": a subschema behind a $ref becomes its own
 # function, which reports through JsonSchemaValuesException while errors are collected.
@@ -34,7 +36,14 @@ class CodeGenerator:
 
     INDENT = 4  # spaces
 
-    def __init__(self, definition, resolver=None, detailed_exceptions=True, fast_fail=True):
+    def __init__(
+        self,
+        definition,
+        resolver=None,
+        detailed_exceptions=True,
+        fast_fail=True,
+        location_map=False,
+    ):
         self._code = []
         self._compile_regexps = {}
         self._custom_formats = {}
@@ -76,6 +85,15 @@ class CodeGenerator:
         self._needed_validation_functions[self._resolver.get_uri()] = self._resolver.get_scope_name()
 
         self._json_keywords_to_function = OrderedDict()
+        self._location_map = LocationMap() if location_map else None
+        self._schema_position = SchemaPosition("")
+        self._current_function = None
+        self._rule_range_recorded = False
+
+    @property
+    def location_map(self):
+        self._generate_func_code()
+        return self._location_map
 
     @property
     def func_code(self):
@@ -95,13 +113,17 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
-        return dict(
+        state = dict(
             **self._extra_imports_objects,
             REGEX_PATTERNS=self._compile_regexps,
             re=re,
             JsonSchemaValueException=JsonSchemaValueException,
             JsonSchemaValuesException=JsonSchemaValuesException,
         )
+        if self._location_map is not None:
+            state['LOCATION_MAP'] = self._location_map
+            state['LOCATION_MAP_ID'] = self._location_map.map_id
+        return state
 
     @property
     def global_state_code(self):
@@ -111,10 +133,18 @@ class CodeGenerator:
         """
         self._generate_func_code()
 
+        location_globals = []
+        if self._location_map is not None:
+            location_globals = [
+                '',
+                'LOCATION_MAP_ID = {!r}'.format(self._location_map.map_id),
+            ]
+
         if not self._compile_regexps:
             return '\n'.join(self._extra_imports_lines + [
                 'from fastjsonschema import JsonSchemaValueException, JsonSchemaValuesException',
                 '',
+                *location_globals,
                 '',
             ])
         return '\n'.join(self._extra_imports_lines + [
@@ -123,6 +153,8 @@ class CodeGenerator:
             '',
             '',
             'REGEX_PATTERNS = ' + serialize_regexes(self._compile_regexps),
+            '',
+            *location_globals,
             '',
         ])
 
@@ -150,35 +182,102 @@ class CodeGenerator:
         Generate validation function for given uri with given name
         """
         self._validation_functions_done.add(uri)
+        self._current_function = name
+        function_position = SchemaPosition.from_uri(uri)
         self.l('')
+        function_start = len(self._code) + 1
         with self._resolver.resolving(uri) as definition:
+            function_position = self._canonicalize_position(function_position, definition)
             with self.l('def {}(data, custom_formats={{}}, name_prefix=None):', name):
                 if not self._fast_fail:
                     self.l('errors = []')
-                self.generate_func_code_block(definition, 'data', 'data', clear_variables=True)
+                if self._location_map is not None:
+                    with self.l('if isinstance(name_prefix, tuple):'):
+                        self.l('name_prefix, location_path = name_prefix')
+                    with self.l('else:'):
+                        self.l('location_path = ()')
+                self.generate_func_code_block(
+                    definition,
+                    'data',
+                    'data',
+                    clear_variables=True,
+                    schema_position=function_position,
+                )
                 if not self._fast_fail:
                     self.l('if errors: raise JsonSchemaValuesException(errors)')
                 self.l('return data')
+        if self._location_map is not None:
+            self._location_map.record_function(
+                name, function_position, function_start, len(self._code)
+            )
 
-    def generate_func_code_block(self, definition, variable, variable_name, clear_variables=False):
+    def generate_func_code_block(
+        self,
+        definition,
+        variable,
+        variable_name,
+        clear_variables=False,
+        schema_position=None,
+    ):
         """
         Creates validation rules for current definition.
 
         Returns the number of validation rules generated as code.
         """
-        backup = self._definition, self._variable, self._variable_name
+        backup = (
+            self._definition,
+            self._variable,
+            self._variable_name,
+            self._schema_position,
+        )
+        schema_position = self._canonicalize_position(
+            schema_position or self._schema_position,
+            definition,
+        )
         self._definition, self._variable, self._variable_name = definition, variable, variable_name
+        self._schema_position = schema_position
         if clear_variables:
             backup_variables = self._variables
             self._variables = {}
 
         count = self._generate_func_code_block(definition)
 
-        self._definition, self._variable, self._variable_name = backup
+        (
+            self._definition,
+            self._variable,
+            self._variable_name,
+            self._schema_position,
+        ) = backup
         if clear_variables:
             self._variables = backup_variables
 
         return count
+
+    def _canonicalize_position(self, position, definition):
+        if self._location_map is None or not position.pointer:
+            return position
+        if isinstance(definition, dict):
+            schema_id = definition.get('$id', definition.get('id'))
+            if isinstance(schema_id, str):
+                return SchemaPosition.from_uri(urljoin(position.resource or '', schema_id))
+        return position
+
+    def child_position(self, *tokens, definition=None):
+        if self._location_map is None:
+            return self._schema_position
+        position = self._schema_position
+        for index, token in enumerate(tokens):
+            position = position.child(
+                token,
+                definition if index == len(tokens) - 1 else None,
+            )
+        return position
+
+    def _record_rule(self, name, position, rule, start_line, end_line, location_id=None):
+        if self._location_map is not None:
+            self._location_map.record_rule(
+                name, position, rule, start_line, end_line, location_id
+            )
 
     @contextmanager
     def trial_validation(self):
@@ -206,7 +305,18 @@ class CodeGenerator:
         count = 0
         for key, func in self._json_keywords_to_function.items():
             if key in definition:
+                start_line = len(self._code) + 1
+                self._rule_range_recorded = False
                 func()
+                if not self._rule_range_recorded:
+                    self._record_rule(
+                        self._current_function,
+                        self._schema_position,
+                        key,
+                        start_line,
+                        len(self._code),
+                    )
+                self._rule_range_recorded = False
                 count += 1
         return count
 
@@ -227,6 +337,12 @@ class CodeGenerator:
         with self._resolver.in_scope(self._definition['$ref']):
             name = self._resolver.get_scope_name()
             uri = self._resolver.get_uri()
+            target_position = SchemaPosition.from_uri(uri)
+            reference_id = None
+            if self._location_map is not None:
+                reference_id = self._location_map.new_id()
+                target_definition = self._resolve_definition_for_location(uri)
+                target_position = self._canonicalize_position(target_position, target_definition)
             if uri not in self._validation_functions_done:
                 self._needed_validation_functions[uri] = name
             # call validation function
@@ -235,15 +351,56 @@ class CodeGenerator:
             name_arg = '(name_prefix or "data") + "{}"'.format(path)
             if '{' in name_arg or '}' in name_arg:
                 name_arg = name_arg + '.format(**locals())'
+            display_name_arg = name_arg
+            if self._location_map is not None:
+                name_arg = '({}, location_path + ({},))'.format(display_name_arg, reference_id)
             if self._fast_fail:
+                reference_start = len(self._code) + 1
                 self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                self._record_reference(
+                    name, target_position, reference_start, len(self._code), reference_id
+                )
             else:
                 # The referenced function collects into its own list, so merge it into ours
                 # instead of letting it abort the validation of the rest of the document.
                 with self.l('try:', optimize=False):
+                    reference_start = len(self._code) + 1
                     self.l('{}({variable}, custom_formats, {name_arg})', name, name_arg=name_arg)
+                    self._record_reference(
+                        name, target_position, reference_start, len(self._code), reference_id
+                    )
                 with self.l('except JsonSchemaValuesException as e:'):
                     self.l('errors.extend(e.errors)')
+
+    def _record_reference(self, name, target_position, start_line, end_line, reference_id):
+        if self._location_map is not None:
+            self._location_map.record_reference(
+                self._current_function,
+                self._schema_position,
+                target_position,
+                self._definition['$ref'],
+                start_line,
+                end_line,
+                reference_id,
+            )
+
+    def _resolve_definition_for_location(self, uri):
+        resource_uri, fragment = urldefrag(uri)
+        normalized_uri = normalize(resource_uri) if resource_uri else ''
+        resolver = self._resolver
+        if normalized_uri in resolver.store:
+            schema = resolver.store[normalized_uri]
+        elif not resource_uri or resource_uri == resolver.base_uri:
+            schema = resolver.schema
+        else:
+            schema = resolve_remote(resource_uri, resolver.handlers)
+            resolver.store[normalized_uri] = schema
+
+        if fragment and fragment.startswith('/'):
+            return resolve_path(schema, fragment)
+        if fragment:
+            return resolver.store.get(normalize(uri), schema)
+        return schema
 
 
     # pylint: disable=invalid-name
@@ -303,25 +460,81 @@ class CodeGenerator:
         """
         Short-cut for creating raising exception in the code.
         """
+        rule_id = None
+        if self._location_map is not None:
+            rule_id = self._location_map.new_id()
         if not self._detailed_exceptions:
             if self._fast_fail:
-                self.l('raise JsonSchemaValueException("'+msg+'")', *args)
+                if self._location_map is not None:
+                    self.l(
+                        'raise JsonSchemaValueException("' + msg
+                        + '", rule_id={}, ref_path=location_path)',
+                        *args,
+                        rule_id,
+                    )
+                    self._record_rule(
+                        self._current_function,
+                        self._schema_position,
+                        rule,
+                        len(self._code),
+                        len(self._code),
+                        rule_id,
+                    )
+                    self._rule_range_recorded = True
+                else:
+                    self.l('raise JsonSchemaValueException("'+msg+'")', *args)
             else:
-                self.l('errors.append(JsonSchemaValueException("'+msg+'"))', *args)
+                if self._location_map is not None:
+                    self.l(
+                        'errors.append(JsonSchemaValueException("' + msg + '", rule_id={}, ref_path=location_path))',
+                        *args,
+                        rule_id,
+                    )
+                    self._record_rule(
+                        self._current_function,
+                        self._schema_position,
+                        rule,
+                        len(self._code),
+                        len(self._code),
+                        rule_id,
+                    )
+                    self._rule_range_recorded = True
+                else:
+                    self.l('errors.append(JsonSchemaValueException("'+msg+'"))', *args)
             return
 
         arg = '"'+msg+'"'
         if append_to_msg:
             arg += ' + (' + append_to_msg + ')'
+        location_args = ''
+        if self._location_map is not None:
+            location_args = ', rule_id={}, ref_path=location_path'.format(rule_id)
         # pylint: disable=line-too-long
-        msg = (
-            'raise JsonSchemaValueException('+arg+', value={variable}, name="{name}", definition={definition}, rule={rule})'
-            if self._fast_fail else
-            'errors.append(JsonSchemaValueException('+arg+', value={variable}, name="{name}", definition={definition}, rule={rule}))'
-        )
+        if self._fast_fail:
+            msg = (
+                'raise JsonSchemaValueException(' + arg
+                + ', value={variable}, name="{name}", definition={definition}, rule={rule}'
+                + location_args + ')'
+            )
+        else:
+            msg = (
+                'errors.append(JsonSchemaValueException(' + arg
+                + ', value={variable}, name="{name}", definition={definition}, rule={rule}'
+                + location_args + '))'
+            )
         definition = self._expand_refs(self._definition)
         definition_rule = self.e(definition.get(rule) if isinstance(definition, dict) else None)
         self.l(msg, *args, definition=repr_default(definition), rule=repr(rule), definition_rule=definition_rule)
+        if self._location_map is not None:
+            self._record_rule(
+                self._current_function,
+                self._schema_position,
+                rule,
+                len(self._code),
+                len(self._code),
+                rule_id,
+            )
+            self._rule_range_recorded = True
 
     def _expand_refs(self, definition):
         if isinstance(definition, list):

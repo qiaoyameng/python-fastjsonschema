@@ -27,9 +27,19 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
         use_default=True,
         use_formats=True,
         detailed_exceptions=True,
-        fast_fail=True
+        fast_fail=True,
+        location_map=False,
     ):
-        super().__init__(definition, resolver, formats, use_default, use_formats, detailed_exceptions, fast_fail)
+        super().__init__(
+            definition,
+            resolver,
+            formats,
+            use_default,
+            use_formats,
+            detailed_exceptions,
+            fast_fail,
+            location_map,
+        )
         # pylint: disable=duplicate-code
         self._json_keywords_to_function.update((
             ('if', self.generate_if_then_else),
@@ -64,7 +74,8 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
                     self._definition['if'],
                     self._variable,
                     self._variable_name,
-                    clear_variables=True
+                    clear_variables=True,
+                    schema_position=self.child_position('if'),
                 )
             if len(self._code) == code_len:
                 self.l('pass')
@@ -75,7 +86,8 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
                     self._definition['else'],
                     self._variable,
                     self._variable_name,
-                    clear_variables=True
+                    clear_variables=True,
+                    schema_position=self.child_position('else'),
                 )
                 if len(self._code) == code_len:
                     self.l('pass')
@@ -88,7 +100,8 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
                     self._definition['then'],
                     self._variable,
                     self._variable_name,
-                    clear_variables=True
+                    clear_variables=True,
+                    schema_position=self.child_position('then'),
                 )
                 if len(self._code) == code_len:
                     self.l('pass')
@@ -109,9 +122,9 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
                     self.l('import base64')
                     self.l('{variable} = base64.b64decode({variable})')
                 with self.l('except Exception:'):
-                    self.exc('{name} must be encoded by base64')
+                    self.exc('{name} must be encoded by base64', rule='contentEncoding')
                 with self.l('if {variable} == "":'):
-                    self.exc('contentEncoding must be base64')
+                    self.exc('contentEncoding must be base64', rule='contentEncoding')
 
     def generate_content_media_type(self):
         """
@@ -128,10 +141,10 @@ class CodeGeneratorDraft07(CodeGeneratorDraft06):
                 with self.l('try:'):
                     self.l('{variable} = {variable}.decode("utf-8")')
                 with self.l('except Exception:'):
-                    self.exc('{name} must encoded by utf8')
+                    self.exc('{name} must encoded by utf8', rule='contentMediaType')
             with self.l('if isinstance({variable}, str):'):
                 with self.l('try:'):
                     self.l('import json')
                     self.l('{variable} = json.loads({variable})')
                 with self.l('except Exception:'):
-                    self.exc('{name} must be valid JSON')
+                    self.exc('{name} must be valid JSON', rule='contentMediaType')
